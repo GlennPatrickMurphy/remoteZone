@@ -2,6 +2,10 @@
 
 An automated script that monitors NFL games for redzone activity and automatically changes your TV channel based on priority when teams are in the redzone.
 
+> **⚠️ IMPORTANT: This only works with Rogers TV boxes!**  
+> You must have a Rogers cable/TV subscription with web remote access at [rogers.webremote.com](https://rogers.webremote.com/remote).  
+> This will not work with other TV providers.
+
 ## Features
 
 - **Real-time NFL monitoring**: Fetches live game data from ESPN API every 30 seconds
@@ -12,10 +16,18 @@ An automated script that monitors NFL games for redzone activity and automatical
 
 ## Requirements
 
+### Essential (Must Have)
+- **Rogers TV Service**: You MUST have a Rogers cable/TV subscription
+- **Rogers Web Remote**: Access to [rogers.webremote.com/remote](https://rogers.webremote.com/remote)
+- **Rogers Account**: Valid login credentials for Rogers
+
+### Technical Requirements
 - Python 3.7+
 - Chrome browser
-- Rogers account with web remote access
+- ChromeDriver (matching your Chrome version)
 - Internet connection
+
+> **Note:** This application is specifically designed for Rogers TV customers in Canada. It will not work with other cable/TV providers as it relies on Rogers' proprietary web remote interface.
 
 ## Installation
 
@@ -174,9 +186,28 @@ You can modify the script to:
 - Modify priority logic
 - Add notifications or alerts
 
+## Compatibility
+
+### ✅ Works With:
+- Rogers Ignite TV
+- Rogers Legacy Digital Cable (with web remote access)
+- Any Rogers TV service that supports [rogers.webremote.com](https://rogers.webremote.com/remote)
+
+### ❌ Does NOT Work With:
+- Bell TV
+- Telus TV
+- Shaw/Freedom TV (unless merged with Rogers)
+- Any other TV provider
+- Streaming services (Netflix, Prime, etc.)
+- Smart TVs without Rogers box
+
+**Why Rogers only?** This app controls your TV by automating the Rogers web remote interface. Other providers have different remote systems that aren't compatible.
+
 ## Disclaimer
 
 This script is for personal use only. Please respect ESPN's API terms of service and Rogers' web remote usage policies. The script is provided as-is without warranty.
+
+**Rogers Customers Only:** You must have an active Rogers TV subscription. This is not affiliated with or endorsed by Rogers Communications Inc.
 
 ## Support
 
