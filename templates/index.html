@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NFL Redzone TV Controller</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header .emoji {
+            font-size: 3em;
+        }
+
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .card h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+
+        .status-badge.active {
+            background: #10b981;
+            color: white;
+        }
+
+        .status-badge.inactive {
+            background: #ef4444;
+            color: white;
+        }
+
+        .status-badge.pending {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 600;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 1em;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .channel-inputs {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-success {
+            background: #10b981;
+            color: white;
+        }
+
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+
+        .btn-secondary {
+            background: #6b7280;
+            color: white;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .games-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+        }
+
+        .game-card {
+            background: #f9fafb;
+            border: 2px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 15px;
+            transition: all 0.3s;
+        }
+
+        .game-card.redzone {
+            border-color: #ef4444;
+            background: #fee2e2;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+            }
+            50% {
+                box-shadow: 0 0 0 10px rgba(239, 68, 68, 0);
+            }
+        }
+
+        .game-card h3 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+
+        .game-info {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .game-info strong {
+            color: #333;
+        }
+
+        .redzone-indicator {
+            background: #ef4444;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin-top: 10px;
+            display: inline-block;
+        }
+
+        .logs-container {
+            background: #1f2937;
+            border-radius: 10px;
+            padding: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-radius: 3px;
+        }
+
+        .log-entry.info {
+            color: #10b981;
+        }
+
+        .log-entry.warning {
+            color: #f59e0b;
+        }
+
+        .log-entry.error {
+            color: #ef4444;
+        }
+
+        .log-timestamp {
+            color: #9ca3af;
+            margin-right: 10px;
+        }
+
+        .current-channel {
+            font-size: 2em;
+            color: #667eea;
+            font-weight: bold;
+            text-align: center;
+            margin: 15px 0;
+        }
+
+        .step-indicator {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 30px;
+        }
+
+        .step {
+            flex: 1;
+            text-align: center;
+            padding: 15px;
+            background: #f3f4f6;
+            margin: 0 5px;
+            border-radius: 8px;
+            position: relative;
+        }
+
+        .step.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .step.completed {
+            background: #10b981;
+            color: white;
+        }
+
+        .step-number {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            line-height: 30px;
+            border-radius: 50%;
+            background: white;
+            color: #667eea;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .alert-info {
+            background: #dbeafe;
+            color: #1e40af;
+            border-left: 4px solid #3b82f6;
+        }
+
+        .alert-success {
+            background: #d1fae5;
+            color: #065f46;
+            border-left: 4px solid #10b981;
+        }
+
+        .alert-error {
+            background: #fee2e2;
+            color: #991b1b;
+            border-left: 4px solid #ef4444;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .game-selector-card {
+            background: white;
+            border: 2px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .game-selector-card.selected {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+
+        .game-selector-info {
+            flex: 1;
+        }
+
+        .game-selector-info h4 {
+            margin: 0 0 5px 0;
+            color: #333;
+        }
+
+        .game-selector-info .game-status {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .game-selector-info .game-status.live {
+            color: #ef4444;
+            font-weight: bold;
+        }
+
+        .game-selector-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .game-selector-controls select {
+            padding: 8px;
+            border: 2px solid #e5e7eb;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+
+        .game-selector-controls .btn-small {
+            padding: 8px 16px;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="emoji">🏈</div>
+            <h1>NFL Redzone TV Controller</h1>
+            <p>Automatic channel switching based on redzone activity</p>
+        </div>
+
+        <!-- Status Overview -->
+        <div class="card">
+            <h2>Status <span id="statusBadge" class="status-badge inactive">Inactive</span></h2>
+            <div class="current-channel">
+                Current Channel: <span id="currentChannel">--</span>
+            </div>
+        </div>
+
+        <!-- Step 1: Configure Channels -->
+        <div class="card" id="step1">
+            <h2>Step 1: Configure Channels & Select Games</h2>
+            <div class="alert alert-info">
+                First, enter your channel numbers. Then select which games to monitor.
+            </div>
+            
+            <h3 style="margin-top: 20px; margin-bottom: 15px;">Enter Channels</h3>
+            <div class="channel-inputs">
+                <div class="form-group">
+                    <label>Channel 1 (Highest Priority)</label>
+                    <input type="number" id="channel1" placeholder="e.g., 502" min="1" max="9999">
+                </div>
+                <div class="form-group">
+                    <label>Channel 2</label>
+                    <input type="number" id="channel2" placeholder="e.g., 506" min="1" max="9999">
+                </div>
+                <div class="form-group">
+                    <label>Channel 3 (Optional)</label>
+                    <input type="number" id="channel3" placeholder="e.g., 510" min="1" max="9999">
+                </div>
+            </div>
+            <button class="btn btn-primary" onclick="setupChannels()">Save Channels</button>
+            
+            <h3 style="margin-top: 30px; margin-bottom: 15px;">Select Games to Monitor</h3>
+            <button class="btn btn-secondary" onclick="loadAllGames()">Load Today's Games</button>
+            <button class="btn btn-danger" onclick="clearMappings()">Clear All Mappings</button>
+            
+            <div id="gameSelector" style="margin-top: 20px;"></div>
+            <div id="configStatus"></div>
+        </div>
+
+        <!-- Step 2: Authenticate with Rogers -->
+        <div class="card" id="step2">
+            <h2>Step 2: Authenticate with Rogers Web Remote</h2>
+            <div class="alert alert-info">
+                Click to open Rogers web remote in a new window. Sign in, then click "Check Authentication".
+            </div>
+            <button class="btn btn-primary" onclick="openRemote()">Open Rogers Remote</button>
+            <button class="btn btn-secondary" onclick="checkAuth()">Check Authentication</button>
+            <span id="authStatus" class="status-badge inactive">Not Authenticated</span>
+            
+            <h3 style="margin-top: 30px; margin-bottom: 15px;">Test Channel Change</h3>
+            <div class="alert alert-info">
+                After authenticating, test that the remote control is working by changing to a channel.
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <input type="number" id="testChannel" placeholder="Enter channel (e.g., 516)" min="1" max="9999" style="padding: 12px; border: 2px solid #e5e7eb; border-radius: 8px; font-size: 1em; width: 250px;">
+                <button class="btn btn-success" onclick="testChannelChange()">Test Channel Change</button>
+            </div>
+            <div id="authMessage"></div>
+        </div>
+
+        <!-- Step 3: Monitor Games -->
+        <div class="card" id="step3">
+            <h2>Step 3: Monitor & Control</h2>
+            <button class="btn btn-success" id="startBtn" onclick="startMonitoring()">Start Monitoring</button>
+            <button class="btn btn-danger" id="stopBtn" onclick="stopMonitoring()" style="display:none;">Stop Monitoring</button>
+            <button class="btn btn-secondary" onclick="refreshGames()">Refresh Games</button>
+        </div>
+
+        <!-- Games Display -->
+        <div class="card">
+            <h2>Live Games</h2>
+            <div id="gamesContainer" class="games-grid">
+                <p style="color: #666;">No games configured yet. Complete Step 1 to discover games.</p>
+            </div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="card">
+            <h2>Activity Log</h2>
+            <div class="logs-container" id="logsContainer">
+                <div class="log-entry info">
+                    <span class="log-timestamp">--:--:--</span>
+                    Waiting to start...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let statusInterval = null;
+        let availableChannels = [];
+        let allGamesData = [];
+
+        // Update status every 2 seconds
+        function startStatusUpdates() {
+            if (statusInterval) return;
+            statusInterval = setInterval(updateStatus, 2000);
+            updateStatus(); // Initial update
+        }
+
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+
+                // Update status badge
+                const statusBadge = document.getElementById('statusBadge');
+                if (data.is_running) {
+                    statusBadge.textContent = 'Monitoring';
+                    statusBadge.className = 'status-badge active';
+                    document.getElementById('startBtn').style.display = 'none';
+                    document.getElementById('stopBtn').style.display = 'inline-block';
+                } else {
+                    statusBadge.textContent = 'Inactive';
+                    statusBadge.className = 'status-badge inactive';
+                    document.getElementById('startBtn').style.display = 'inline-block';
+                    document.getElementById('stopBtn').style.display = 'none';
+                }
+
+                // Update current channel
+                document.getElementById('currentChannel').textContent = data.current_channel || '--';
+
+                // Update auth status
+                const authStatus = document.getElementById('authStatus');
+                if (data.is_authenticated) {
+                    authStatus.textContent = 'Authenticated';
+                    authStatus.className = 'status-badge active';
+                } else {
+                    authStatus.textContent = 'Not Authenticated';
+                    authStatus.className = 'status-badge inactive';
+                }
+
+                // Update games
+                if (data.games && data.games.length > 0) {
+                    updateGames(data.games);
+                }
+
+                // Update logs
+                if (data.logs && data.logs.length > 0) {
+                    updateLogs(data.logs);
+                }
+
+            } catch (error) {
+                console.error('Error updating status:', error);
+            }
+        }
+
+        function updateGames(games) {
+            const container = document.getElementById('gamesContainer');
+            if (games.length === 0) {
+                container.innerHTML = '<p style="color: #666;">No games found.</p>';
+                return;
+            }
+
+            container.innerHTML = games.map(game => `
+                <div class="game-card ${game.in_redzone ? 'redzone' : ''}">
+                    <h3>${game.away_team} @ ${game.home_team}</h3>
+                    <div class="game-info">
+                        <span><strong>Channel:</strong> ${game.channel}</span>
+                        <span><strong>Priority:</strong> ${game.priority}</span>
+                    </div>
+                    <div class="game-info">
+                        <span><strong>Yards to Endzone:</strong> ${game.yards_to_endzone !== null ? game.yards_to_endzone : 'N/A'}</span>
+                        ${game.play_sequence ? `<span><strong>Play #:</strong> ${game.play_sequence}</span>` : ''}
+                    </div>
+                    ${game.last_play_text ? `
+                        <div class="game-info" style="font-size: 0.85em; color: #666; margin-top: 5px;">
+                            <span><strong>Last Play:</strong> ${game.last_play_text}</span>
+                        </div>
+                    ` : ''}
+                    ${game.play_timestamp ? `
+                        <div class="game-info" style="font-size: 0.8em; color: #999;">
+                            <span><strong>Updated:</strong> ${new Date(game.play_timestamp).toLocaleTimeString()}</span>
+                        </div>
+                    ` : ''}
+                    ${game.in_redzone ? `
+                        <div class="redzone-indicator">
+                            🔴 REDZONE: ${game.last_redzone_team}
+                        </div>
+                    ` : ''}
+                </div>
+            `).join('');
+        }
+
+        function updateLogs(logs) {
+            const container = document.getElementById('logsContainer');
+            container.innerHTML = logs.map(log => `
+                <div class="log-entry ${log.level}">
+                    <span class="log-timestamp">${log.timestamp}</span>
+                    ${log.message}
+                </div>
+            `).join('');
+            // Auto-scroll to bottom
+            container.scrollTop = container.scrollHeight;
+        }
+
+        async function setupChannels() {
+            const ch1 = document.getElementById('channel1').value;
+            const ch2 = document.getElementById('channel2').value;
+            const ch3 = document.getElementById('channel3').value;
+
+            const channels = [ch1, ch2, ch3].filter(ch => ch).map(ch => parseInt(ch));
+
+            if (channels.length < 2) {
+                showMessage('configStatus', 'Please enter at least 2 channels', 'error');
+                return;
+            }
+
+            availableChannels = channels;
+            showMessage('configStatus', `Channels saved: ${channels.join(', ')}. Now load games to map them.`, 'success');
+
+            // Configure channels in backend
+            try {
+                const response = await fetch('/api/configure', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ channels })
+                });
+
+                const data = await response.json();
+                if (!data.success) {
+                    showMessage('configStatus', data.message, 'error');
+                }
+            } catch (error) {
+                showMessage('configStatus', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        async function loadAllGames() {
+            if (availableChannels.length < 2) {
+                showMessage('configStatus', 'Please save channels first!', 'error');
+                return;
+            }
+
+            showMessage('configStatus', 'Loading all games for today...', 'info');
+
+            try {
+                const response = await fetch('/api/all_games');
+                const data = await response.json();
+                allGamesData = data.games;
+
+                if (allGamesData.length === 0) {
+                    showMessage('configStatus', 'No games found for today', 'error');
+                    return;
+                }
+
+                displayGameSelector(allGamesData);
+                showMessage('configStatus', `Found ${allGamesData.length} games!`, 'success');
+            } catch (error) {
+                showMessage('configStatus', 'Error loading games: ' + error.message, 'error');
+            }
+        }
+
+        function displayGameSelector(games) {
+            const container = document.getElementById('gameSelector');
+            
+            container.innerHTML = games.map((game, index) => `
+                <div class="game-selector-card" id="game-${game.event_id}">
+                    <div class="game-selector-info">
+                        <h4>${game.away_team} @ ${game.home_team}</h4>
+                        <div class="game-status ${game.is_live ? 'live' : ''}">
+                            ${game.is_live ? '🔴 LIVE' : game.status}
+                        </div>
+                    </div>
+                    <div class="game-selector-controls">
+                        <select id="channel-select-${game.event_id}">
+                            <option value="">Select Channel</option>
+                            ${availableChannels.map((ch, i) => `
+                                <option value="${ch}" data-priority="${i + 1}">
+                                    Channel ${ch} (Priority ${i + 1})
+                                </option>
+                            `).join('')}
+                        </select>
+                        <button class="btn btn-success btn-small" onclick="mapGameToChannel('${game.event_id}')">
+                            Map Game
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function mapGameToChannel(eventId) {
+            const selectElement = document.getElementById(`channel-select-${eventId}`);
+            const channel = selectElement.value;
+            
+            if (!channel) {
+                alert('Please select a channel first');
+                return;
+            }
+
+            const priority = selectElement.options[selectElement.selectedIndex].dataset.priority;
+
+            try {
+                const response = await fetch('/api/map_game', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        event_id: eventId,
+                        channel: parseInt(channel),
+                        priority: parseInt(priority)
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    // Mark as selected
+                    const card = document.getElementById(`game-${eventId}`);
+                    card.classList.add('selected');
+                    showMessage('configStatus', 'Game mapped successfully!', 'success');
+                    updateStatus();
+                } else {
+                    alert('Error mapping game');
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function clearMappings() {
+            if (!confirm('Clear all game mappings?')) return;
+
+            try {
+                const response = await fetch('/api/clear_games', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    // Remove selected class from all cards
+                    document.querySelectorAll('.game-selector-card').forEach(card => {
+                        card.classList.remove('selected');
+                    });
+                    showMessage('configStatus', 'All mappings cleared', 'success');
+                    updateStatus();
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function openRemote() {
+            showMessage('authMessage', 'Opening Rogers remote...', 'info');
+            try {
+                const response = await fetch('/api/open_remote', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    showMessage('authMessage', 'Rogers remote opened! Please sign in, then click "Check Authentication".', 'success');
+                } else {
+                    const errorMsg = data.error || 'Unknown error';
+                    showMessage('authMessage', `Error: ${errorMsg}<br><br>Make sure Chrome and ChromeDriver are installed.`, 'error');
+                }
+            } catch (error) {
+                showMessage('authMessage', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        async function checkAuth() {
+            try {
+                const response = await fetch('/api/check_auth', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.authenticated) {
+                    showMessage('authMessage', 'Authentication successful! You can now test channel changing below.', 'success');
+                    updateStatus();
+                } else {
+                    showMessage('authMessage', 'Not authenticated yet. Please sign in to Rogers remote.', 'error');
+                }
+            } catch (error) {
+                showMessage('authMessage', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        async function testChannelChange() {
+            const channel = document.getElementById('testChannel').value;
+            
+            if (!channel) {
+                showMessage('authMessage', 'Please enter a channel number to test', 'error');
+                return;
+            }
+
+            showMessage('authMessage', `Testing channel change to ${channel}... Watch your TV!`, 'info');
+
+            try {
+                const response = await fetch('/api/test_channel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ channel: parseInt(channel) })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showMessage('authMessage', `✅ ${data.message}<br><br>Did your TV change to channel ${channel}? If yes, the system is working!`, 'success');
+                } else {
+                    showMessage('authMessage', `❌ ${data.message}<br><br>Make sure you're authenticated with Rogers remote first.`, 'error');
+                }
+                
+                updateStatus();
+            } catch (error) {
+                showMessage('authMessage', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        async function startMonitoring() {
+            try {
+                const response = await fetch('/api/start', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    updateStatus();
+                } else {
+                    alert(data.message);
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function stopMonitoring() {
+            try {
+                const response = await fetch('/api/stop', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    updateStatus();
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function refreshGames() {
+            try {
+                const response = await fetch('/api/refresh_games', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    updateStatus();
+                    alert('Games refreshed!');
+                } else {
+                    alert('Error refreshing games');
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        function showMessage(elementId, message, type) {
+            const element = document.getElementById(elementId);
+            element.innerHTML = `<div class="alert alert-${type}" style="margin-top: 15px;">${message}</div>`;
+        }
+
+        // Load saved configuration
+        async function loadSavedConfig() {
+            try {
+                const response = await fetch('/api/get_config');
+                const data = await response.json();
+                
+                if (data.channels && data.channels.length >= 2) {
+                    // Pre-fill channel inputs
+                    availableChannels = data.channels;
+                    if (data.channels[0]) document.getElementById('channel1').value = data.channels[0];
+                    if (data.channels[1]) document.getElementById('channel2').value = data.channels[1];
+                    if (data.channels[2]) document.getElementById('channel3').value = data.channels[2];
+                    
+                    showMessage('configStatus', `Loaded saved channels: ${data.channels.join(', ')}`, 'success');
+                    
+                    // If games were also saved, show message
+                    if (data.has_games) {
+                        showMessage('configStatus', `Loaded saved configuration with ${data.channels.length} channels and game mappings. Check "Live Games" section below.`, 'success');
+                    }
+                }
+            } catch (error) {
+                console.log('No saved configuration found');
+            }
+        }
+
+        // Start status updates when page loads
+        window.onload = function() {
+            loadSavedConfig();
+            startStatusUpdates();
+        };
+    </script>
+</body>
+</html>

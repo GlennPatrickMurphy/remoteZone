@@ -1,0 +1,81 @@
+# NFL Redzone Controller - .gitignore
+
+# Configuration files (may contain preferences)
+nfl_controller_config.json
+
+# Logs
+*.log
+nfl_redzone_controller.log
+
+# API samples and test data
+api_sample.json
+
+# Python
+*.py[cod]
+*$py.class
+*.so
+.Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE / Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# ChromeDriver / Selenium
+chromedriver
+geckodriver
+*.crx
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Environment variables (if you add them later)
+.env
+.env.local
+.env.*.local
+
+# Jupyter Notebooks (if you add them)
+.ipynb_checkpoints
+*.ipynb
+
+# Database files (if you add them)
+*.db
+*.sqlite
+*.sqlite3
