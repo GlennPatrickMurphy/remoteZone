@@ -34,6 +34,12 @@ ENV/
 env.bak/
 venv.bak/
 
+# Node modules (mobile app)
+mobile-app/node_modules/
+mobile-app/.expo/
+mobile-app/dist/
+mobile-app/.expo-shared/
+
 # IDE / Editors
 .vscode/
 .idea/

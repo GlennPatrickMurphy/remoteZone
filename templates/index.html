@@ -430,15 +430,27 @@
             <div id="configStatus"></div>
         </div>
 
-        <!-- Step 2: Authenticate with Rogers -->
+        <!-- Step 2: Authenticate with Remote Provider -->
         <div class="card" id="step2">
-            <h2>Step 2: Authenticate with Rogers Web Remote</h2>
-            <div class="alert alert-info">
-                Click to open Rogers web remote in a new window. Sign in, then click "Check Authentication".
+            <h2>Step 2: Authenticate with TV Provider</h2>
+            
+            <!-- Provider Selection -->
+            <div style="margin-bottom: 20px;">
+                <label style="display: block; margin-bottom: 10px; font-weight: 600; color: #555;">Select Your TV Provider:</label>
+                <select id="providerSelect" onchange="setProvider()" style="width: 100%; padding: 12px; border: 2px solid #e5e7eb; border-radius: 8px; font-size: 1em; background: white;">
+                    <option value="ROGERS">Rogers</option>
+                    <option value="XFINITY">Xfinity</option>
+                    <option value="SHAW">Shaw</option>
+                </select>
             </div>
-            <button class="btn btn-primary" onclick="openRemote()">Open Rogers Remote</button>
+            
+            <div class="alert alert-info">
+                Select your provider above, then click to open the remote in a new window. Sign in, then click "Check Authentication".
+            </div>
+            <button class="btn btn-primary" onclick="openRemote()">Open Remote</button>
             <button class="btn btn-secondary" onclick="checkAuth()">Check Authentication</button>
             <span id="authStatus" class="status-badge inactive">Not Authenticated</span>
+            <span id="providerBadge" class="status-badge" style="margin-left: 10px; background: #667eea;">Rogers</span>
             
             <h3 style="margin-top: 30px; margin-bottom: 15px;">Test Channel Change</h3>
             <div class="alert alert-info">
@@ -521,6 +533,14 @@
                 } else {
                     authStatus.textContent = 'Not Authenticated';
                     authStatus.className = 'status-badge inactive';
+                }
+                
+                // Update provider badge
+                const providerBadge = document.getElementById('providerBadge');
+                if (data.remote_provider) {
+                    providerBadge.textContent = data.remote_provider;
+                    // Update select dropdown
+                    document.getElementById('providerSelect').value = data.remote_provider;
                 }
 
                 // Update games
@@ -730,16 +750,49 @@
             }
         }
 
-        async function openRemote() {
-            showMessage('authMessage', 'Opening Rogers remote...', 'info');
+        async function setProvider() {
+            const provider = document.getElementById('providerSelect').value;
+            const providerName = provider === 'ROGERS' ? 'Rogers' : provider === 'XFINITY' ? 'Xfinity' : 'Shaw';
+            
             try {
-                const response = await fetch('/api/open_remote', { method: 'POST' });
+                const response = await fetch('/api/set_provider', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ provider: provider })
+                });
                 const data = await response.json();
 
                 if (data.success) {
-                    showMessage('authMessage', 'Rogers remote opened! Please sign in, then click "Check Authentication".', 'success');
+                    document.getElementById('providerBadge').textContent = providerName;
+                    showMessage('authMessage', `Provider set to ${providerName}. Please authenticate.`, 'info');
+                    // Reset auth status when provider changes
+                    document.getElementById('authStatus').textContent = 'Not Authenticated';
+                    document.getElementById('authStatus').className = 'status-badge inactive';
                 } else {
-                    const errorMsg = data.error || 'Unknown error';
+                    showMessage('authMessage', 'Error setting provider: ' + (data.message || data.error), 'error');
+                }
+            } catch (error) {
+                showMessage('authMessage', 'Error: ' + error.message, 'error');
+            }
+        }
+
+        async function openRemote() {
+            const provider = document.getElementById('providerSelect').value;
+            const providerName = provider === 'ROGERS' ? 'Rogers' : provider === 'XFINITY' ? 'Xfinity' : 'Shaw';
+            
+            showMessage('authMessage', `Opening ${providerName} remote...`, 'info');
+            try {
+                const response = await fetch('/api/open_remote', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ provider: provider })
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    showMessage('authMessage', `${providerName} remote opened in a new window! Please sign in, then click "Check Authentication".`, 'success');
+                } else {
+                    const errorMsg = data.error || data.message || 'Unknown error';
                     showMessage('authMessage', `Error: ${errorMsg}<br><br>Make sure Chrome and ChromeDriver are installed.`, 'error');
                 }
             } catch (error) {
@@ -749,14 +802,16 @@
 
         async function checkAuth() {
             try {
-                const response = await fetch('/api/check_auth', { method: 'POST' });
+                const response = await fetch('/api/check_auth');
                 const data = await response.json();
 
-                if (data.authenticated) {
+                if (data.success && data.is_authenticated) {
                     showMessage('authMessage', 'Authentication successful! You can now test channel changing below.', 'success');
                     updateStatus();
                 } else {
-                    showMessage('authMessage', 'Not authenticated yet. Please sign in to Rogers remote.', 'error');
+                    const provider = document.getElementById('providerSelect').value;
+                    const providerName = provider === 'ROGERS' ? 'Rogers' : provider === 'XFINITY' ? 'Xfinity' : 'Shaw';
+                    showMessage('authMessage', `Not authenticated yet. Please sign in to ${providerName} remote.`, 'error');
                 }
             } catch (error) {
                 showMessage('authMessage', 'Error: ' + error.message, 'error');
@@ -784,8 +839,11 @@
 
                 if (data.success) {
                     showMessage('authMessage', `✅ ${data.message}<br><br>Did your TV change to channel ${channel}? If yes, the system is working!`, 'success');
+                    updateStatus();
                 } else {
-                    showMessage('authMessage', `❌ ${data.message}<br><br>Make sure you're authenticated with Rogers remote first.`, 'error');
+                    const provider = document.getElementById('providerSelect').value;
+                    const providerName = provider === 'ROGERS' ? 'Rogers' : provider === 'XFINITY' ? 'Xfinity' : 'Shaw';
+                    showMessage('authMessage', `❌ ${data.message}<br><br>Make sure you're authenticated with ${providerName} remote first.`, 'error');
                 }
                 
                 updateStatus();

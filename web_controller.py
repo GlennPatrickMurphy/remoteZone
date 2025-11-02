@@ -13,12 +13,6 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 from flask import Flask, render_template, request, jsonify, redirect, url_for
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import logging
 
 # Configure logging
@@ -55,6 +49,10 @@ class Game:
     is_end_of_period: bool = False
     home_score: int = 0
     away_score: int = 0
+    last_home_score: int = 0
+    last_away_score: int = 0
+    score_just_changed: bool = False
+    score_change_time: Optional[float] = None
     quarter: int = 0
     clock_seconds: int = 0
     game_excitement_score: float = 0.0
@@ -111,88 +109,109 @@ class ESPNClient:
             logger.error(f"Error fetching game situation for {event_id}: {e}")
             return None
 
+# Remote provider URLs
+REMOTE_PROVIDERS = {
+    'ROGERS': 'https://rogers.webremote.com/remote',
+    'XFINITY': 'https://remote.xfinity.com/remote',
+    'SHAW': 'https://webremote.shaw.ca/remote',
+}
+
 class RogersRemoteController:
-    """Controller for Rogers web remote"""
+    """Controller for TV provider web remote (Rogers/Xfinity/Shaw)"""
     
-    def __init__(self):
+    def __init__(self, provider='ROGERS'):
+        self.provider = provider.upper()
+        self.remote_url = REMOTE_PROVIDERS.get(self.provider, REMOTE_PROVIDERS['ROGERS'])
         self.driver = None
         self.wait = None
         self.is_authenticated = False
-        self.last_channel = None
+        self.headless = True  # Run headless by default for server deployment
     
-    def setup_driver(self):
+    def setup_driver(self, headless=True):
         """Initialize Chrome driver with appropriate options"""
         try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.common.exceptions import TimeoutException, NoSuchElementException
+            
             chrome_options = Options()
+            if headless:
+                chrome_options.add_argument("--headless")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_argument("--window-size=1920,1080")
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
+            chrome_options.add_argument("user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             
             self.driver = webdriver.Chrome(options=chrome_options)
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             self.wait = WebDriverWait(self.driver, 10)
-            logger.info("ChromeDriver initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize ChromeDriver: {e}")
-            raise Exception(f"ChromeDriver error: {str(e)}. Make sure Chrome browser and ChromeDriver are installed.")
-    
-    def open_rogers_remote(self):
-        """Open Rogers web remote"""
-        try:
-            if not self.driver:
-                self.setup_driver()
-            self.driver.get("https://rogers.webremote.com/remote")
-            logger.info("Opened Rogers web remote.")
-            return True
-        except Exception as e:
-            logger.error(f"Error opening Rogers remote: {e}")
-            raise
-    
-    def check_authenticated(self) -> bool:
-        """Check if user is authenticated by looking for remote buttons"""
-        try:
-            # Check if browser window is still open
-            if not self.driver or not self.driver.window_handles:
-                logger.error("Browser window was closed")
-                self.is_authenticated = False
-                self.driver = None
-                return False
+            self.headless = headless
             
-            # Look for a number button to confirm we're on the remote page
-            button = self.driver.find_element(By.CSS_SELECTOR, '[data-vcode="NUMBER_1"]')
-            self.is_authenticated = True
+            # Store for later use
+            self.By = By
+            self.EC = EC
+            self.TimeoutException = TimeoutException
+            self.NoSuchElementException = NoSuchElementException
+            
             return True
-        except NoSuchElementException:
+        except Exception as e:
+            logger.error(f"Error setting up Chrome driver: {e}")
+            logger.error("Make sure Chrome and ChromeDriver are installed")
+            return False
+    
+    def open_remote(self):
+        """Open remote URL and wait for potential authentication"""
+        if not self.driver:
+            if not self.setup_driver(self.headless):
+                return False
+        
+        try:
+            self.driver.get(self.remote_url)
+            logger.info(f"Opened {self.provider} remote: {self.remote_url}")
+            time.sleep(3)  # Wait for page to load
+            return True
+        except Exception as e:
+            logger.error(f"Error opening remote: {e}")
+            return False
+    
+    def check_authentication(self) -> bool:
+        """Check if user is authenticated by looking for remote buttons"""
+        if not self.driver:
+            return False
+        
+        try:
+            # Look for number buttons - if they exist, we're authenticated
+            button = self.wait.until(
+                self.EC.presence_of_element_located((self.By.CSS_SELECTOR, '[data-vcode="NUMBER_1"]'))
+            )
+            self.is_authenticated = True
+            logger.info(f"Authentication confirmed for {self.provider}")
+            return True
+        except self.TimeoutException:
             self.is_authenticated = False
+            logger.warning(f"Not authenticated with {self.provider} - remote buttons not found")
             return False
         except Exception as e:
-            error_msg = str(e)
-            if "no such window" in error_msg or "target window already closed" in error_msg:
-                logger.error("Browser window was closed - authentication lost")
-                self.is_authenticated = False
-                self.driver = None
+            logger.error(f"Error checking authentication: {e}")
             return False
     
     def change_channel(self, channel_number: int) -> bool:
         """Change TV channel to specified number"""
         if not self.is_authenticated:
-            logger.error("Not authenticated with Rogers remote")
+            logger.error(f"Not authenticated with {self.provider} remote")
             return False
         
-        if self.last_channel == channel_number:
-            logger.info(f"Already on channel {channel_number}")
-            return True
+        if not self.driver:
+            if not self.open_remote():
+                return False
         
         try:
-            # Check if browser window is still open
-            if not self.driver or not self.driver.window_handles:
-                logger.error("Browser window was closed")
-                self.is_authenticated = False
-                return False
-            
-            # Convert channel number to individual digits
             channel_str = str(channel_number)
             logger.info(f"Changing channel to {channel_number}")
             
@@ -201,50 +220,48 @@ class RogersRemoteController:
                 button_id = f"NUMBER_{digit}"
                 try:
                     button = self.wait.until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, f'[data-vcode="{button_id}"]'))
+                        self.EC.element_to_be_clickable((self.By.CSS_SELECTOR, f'[data-vcode="{button_id}"]'))
                     )
                     button.click()
-                    time.sleep(0.5)  # Small delay between button presses
-                except TimeoutException:
+                    time.sleep(0.4)  # Delay between button presses
+                except self.TimeoutException:
                     logger.error(f"Could not find button for digit {digit}")
                     return False
             
             # Press ENTER to confirm channel change
             try:
                 enter_button = self.wait.until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, '[data-vcode="ENTER"]'))
+                    self.EC.element_to_be_clickable((self.By.CSS_SELECTOR, '[data-vcode="ENTER"]'))
                 )
                 enter_button.click()
-                self.last_channel = channel_number
                 logger.info(f"Successfully changed channel to {channel_number}")
+                time.sleep(0.5)
                 return True
-            except TimeoutException:
+            except self.TimeoutException:
                 logger.error("Could not find ENTER button")
                 return False
                 
         except Exception as e:
-            error_msg = str(e)
-            if "no such window" in error_msg or "target window already closed" in error_msg:
-                logger.error("Browser window was closed - authentication lost")
-                self.is_authenticated = False
-                self.driver = None
-            else:
-                logger.error(f"Error changing channel to {channel_number}: {e}")
+            logger.error(f"Error changing channel to {channel_number}: {e}")
             return False
     
     def close(self):
         """Close the browser driver"""
         if self.driver:
-            self.driver.quit()
-            self.driver = None
-            self.is_authenticated = False
+            try:
+                self.driver.quit()
+                self.driver = None
+                self.wait = None
+            except:
+                pass
 
 class NFLRedzoneController:
     """Main controller for NFL redzone monitoring and TV control"""
     
-    def __init__(self):
+    def __init__(self, remote_provider='ROGERS'):
         self.espn_client = ESPNClient()
-        self.remote_controller = RogersRemoteController()
+        self.remote_controller = RogersRemoteController(remote_provider)
+        self.remote_provider = remote_provider
         self.games: Dict[str, Game] = {}
         self.channel_mapping: Dict[int, str] = {}
         self.current_channel: Optional[int] = None
@@ -471,13 +488,27 @@ class NFLRedzoneController:
             header = summary.get('header', {})
             competitions = header.get('competitions', [{}])[0]
             
-            # Get scores
+            # Get scores and detect score changes
             competitors = competitions.get('competitors', [])
             for comp in competitors:
                 score = int(comp.get('score', 0))
                 if comp.get('homeAway') == 'home':
+                    # Check if score changed (compare with current score before updating)
+                    if game.home_score != score:
+                        # Score changed - track the change
+                        game.score_just_changed = True
+                        game.score_change_time = time.time()
+                        game.last_home_score = game.home_score  # Store previous score
+                        logger.info(f"Score changed for {game.home_team} vs {game.away_team}: {game.last_home_score} -> {score} (commercials coming, reducing priority)")
                     game.home_score = score
                 else:
+                    # Check if score changed (compare with current score before updating)
+                    if game.away_score != score:
+                        # Score changed - track the change
+                        game.score_just_changed = True
+                        game.score_change_time = time.time()
+                        game.last_away_score = game.away_score  # Store previous score
+                        logger.info(f"Score changed for {game.home_team} vs {game.away_team}: {game.last_away_score} -> {score} (commercials coming, reducing priority)")
                     game.away_score = score
             
             # Get period and clock
@@ -506,7 +537,7 @@ class NFLRedzoneController:
             if not game.is_timeout:
                 game.is_timeout = True
                 game.timeout_start_time = time.time()
-                logger.info(f"Timeout detected for {game.home_team} vs {game.away_team}")
+                logger.info(f"Timeout detected for {game.home_team} vs {game.away_team} - commercials coming, reducing priority")
         else:
             # Check if timeout has expired (3 minutes)
             if game.is_timeout and game.timeout_start_time:
@@ -514,6 +545,13 @@ class NFLRedzoneController:
                     game.is_timeout = False
                     game.timeout_start_time = None
                     logger.info(f"Timeout expired for {game.home_team} vs {game.away_team}")
+        
+        # Check if score change timeout has expired (2 minutes for commercials after score)
+        if game.score_just_changed and game.score_change_time:
+            if time.time() - game.score_change_time > 120:  # 2 minutes
+                game.score_just_changed = False
+                game.score_change_time = None
+                logger.info(f"Score change timeout expired for {game.home_team} vs {game.away_team}")
         
         # Detect end of period (quarter/half)
         game.is_end_of_period = (game.clock_seconds == 0 or 
@@ -663,7 +701,7 @@ class NFLRedzoneController:
                 logger.debug(f"Skipping {game_key} - end of period")
                 continue
             
-            # Redzone is highest priority
+            # Redzone is highest priority (but commercials still reduce priority)
             if game.in_redzone:
                 score += 1000  # Massive score for redzone
                 reason.append(f"REDZONE {game.last_redzone_team} at {game.yards_to_endzone}yd")
@@ -671,6 +709,20 @@ class NFLRedzoneController:
                 # Bonus for closer to goal
                 if game.yards_to_endzone:
                     score += (30 - game.yards_to_endzone) * 10  # Closer = higher score
+            
+            # Penalty for timeout or score change (commercials coming!)
+            # This penalty applies even to redzone games to avoid watching commercials
+            commercial_penalty = 0
+            if game.is_timeout:
+                commercial_penalty = 500  # Large penalty for timeout = commercials
+                reason.append("⏸️ TIMEOUT")
+            elif game.score_just_changed:
+                commercial_penalty = 400  # Large penalty for score change = commercials
+                reason.append("🎉 SCORE CHANGED")
+            
+            # Apply commercial penalty (reduce priority significantly)
+            # Even redzone games get penalized when commercials are on
+            score -= commercial_penalty
             
             # Add excitement score (close games in 4th quarter)
             score += game.game_excitement_score
@@ -726,7 +778,7 @@ class NFLRedzoneController:
         return best['channel']
     
     def monitoring_loop(self):
-        """Main monitoring loop"""
+        """Main monitoring loop - automatically changes channels on server"""
         logger.info("Starting NFL redzone monitoring...")
         self.add_log("🏈 Monitoring started!")
         
@@ -735,16 +787,19 @@ class NFLRedzoneController:
                 target_channel = self.determine_target_channel()
                 
                 if target_channel and target_channel != self.current_channel:
-                    success = self.remote_controller.change_channel(target_channel)
-                    if success:
-                        self.current_channel = target_channel
-                        self.add_log(f"📺 Changed to channel {target_channel}")
-                    else:
-                        # Check if authentication was lost due to closed window
-                        if not self.remote_controller.is_authenticated:
-                            self.add_log(f"⚠️ Browser window closed - Please reopen Rogers remote and re-authenticate", "error")
+                    # Actually change the channel (server-side control)
+                    if self.remote_controller.is_authenticated:
+                        success = self.remote_controller.change_channel(target_channel)
+                        if success:
+                            self.current_channel = target_channel
+                            self.add_log(f"📺 Changed to channel: {target_channel}")
+                            logger.info(f"Successfully changed channel to {target_channel}")
                         else:
-                            self.add_log(f"Failed to change channel to {target_channel}", "error")
+                            self.add_log(f"⚠️ Failed to change to channel: {target_channel}", "error")
+                            logger.error(f"Failed to change channel to {target_channel}")
+                    else:
+                        self.add_log(f"⚠️ Not authenticated - cannot change channel", "error")
+                        logger.warning("Not authenticated with remote - cannot change channels")
                 
                 # Wait 30 seconds before next check
                 time.sleep(30)
@@ -759,11 +814,22 @@ class NFLRedzoneController:
     def start_monitoring(self):
         """Start the monitoring loop in a background thread"""
         if self.is_running:
+            logger.warning("Monitoring already running")
             return False
         
         self.is_running = True
         self.monitoring_thread = threading.Thread(target=self.monitoring_loop, daemon=True)
         self.monitoring_thread.start()
+        logger.info(f"Monitoring thread started. is_running: {self.is_running}")
+        # Verify thread started
+        import time
+        time.sleep(0.1)
+        if self.monitoring_thread.is_alive():
+            logger.info("Monitoring thread confirmed alive")
+        else:
+            logger.error("Monitoring thread failed to start")
+            self.is_running = False
+            return False
         return True
     
     def stop_monitoring(self):
@@ -796,11 +862,12 @@ def get_status():
     
     return jsonify({
         'is_running': controller.is_running,
-        'is_authenticated': controller.remote_controller.is_authenticated,
         'current_channel': controller.current_channel,
         'games': games_list,
         'logs': controller.status_logs[-20:],  # Last 20 logs
-        'saved_channels': list(controller.channel_mapping.keys())  # Include saved channels
+        'saved_channels': list(controller.channel_mapping.keys()),  # Include saved channels
+        'is_authenticated': controller.remote_controller.is_authenticated,
+        'remote_provider': controller.remote_provider
     })
 
 @app.route('/api/get_config')
@@ -825,34 +892,18 @@ def configure():
     else:
         return jsonify({'success': False, 'message': 'Invalid channel configuration'})
 
-@app.route('/api/open_remote', methods=['POST'])
-def open_remote():
-    """Open Rogers web remote"""
+@app.route('/api/recommended_channel', methods=['GET'])
+def get_recommended_channel():
+    """Get the recommended channel based on game analysis"""
     try:
-        success = controller.remote_controller.open_rogers_remote()
-        return jsonify({'success': success})
+        recommended = controller.determine_target_channel()
+        return jsonify({
+            'success': True,
+            'recommended_channel': recommended,
+            'current_channel': controller.current_channel
+        })
     except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Failed to open Rogers remote: {error_msg}")
-        return jsonify({'success': False, 'error': error_msg})
-
-@app.route('/api/check_auth', methods=['POST'])
-def check_auth():
-    """Check if authenticated with Rogers"""
-    is_auth = controller.remote_controller.check_authenticated()
-    return jsonify({'authenticated': is_auth})
-
-@app.route('/api/start', methods=['POST'])
-def start_monitoring():
-    """Start monitoring"""
-    if not controller.remote_controller.is_authenticated:
-        return jsonify({'success': False, 'message': 'Not authenticated with Rogers'})
-    
-    if not controller.games:
-        return jsonify({'success': False, 'message': 'No games configured'})
-    
-    success = controller.start_monitoring()
-    return jsonify({'success': success})
+        return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/stop', methods=['POST'])
 def stop_monitoring():
@@ -893,33 +944,131 @@ def clear_games():
     controller.add_log("Cleared all game mappings")
     return jsonify({'success': True})
 
-@app.route('/api/test_channel', methods=['POST'])
-def test_channel():
-    """Test changing to a specific channel"""
-    data = request.json
-    channel = data.get('channel')
-    
-    if not channel:
-        return jsonify({'success': False, 'message': 'No channel provided'})
-    
+@app.route('/api/open_remote', methods=['POST'])
+def open_remote():
+    """Open remote in browser (for authentication)"""
     try:
-        channel_num = int(channel)
-        if not controller.remote_controller.is_authenticated:
-            return jsonify({'success': False, 'message': 'Not authenticated with Rogers remote'})
+        data = request.json or {}
+        provider = data.get('provider', 'ROGERS')
         
-        controller.add_log(f"Testing channel change to {channel_num}...")
-        success = controller.remote_controller.change_channel(channel_num)
+        # Update controller with new provider if different
+        if controller.remote_provider != provider:
+            controller.remote_controller.close()
+            controller.remote_controller = RogersRemoteController(provider)
+            controller.remote_provider = provider
+        
+        # Open remote (headless=False for initial auth, can switch to headless after)
+        controller.remote_controller.headless = False
+        success = controller.remote_controller.open_remote()
         
         if success:
-            controller.add_log(f"✅ Test successful! Changed to channel {channel_num}")
-            return jsonify({'success': True, 'message': f'Successfully changed to channel {channel_num}'})
+            return jsonify({
+                'success': True,
+                'message': f'Opened {provider} remote. Please authenticate in the browser window.',
+                'remote_url': controller.remote_controller.remote_url
+            })
         else:
-            controller.add_log(f"❌ Test failed for channel {channel_num}", "error")
-            return jsonify({'success': False, 'message': 'Failed to change channel'})
+            return jsonify({
+                'success': False,
+                'message': 'Failed to open remote. Make sure Chrome and ChromeDriver are installed.'
+            })
     except Exception as e:
-        error_msg = str(e)
-        controller.add_log(f"Error testing channel: {error_msg}", "error")
-        return jsonify({'success': False, 'message': error_msg})
+        logger.error(f"Error opening remote: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/check_auth', methods=['GET'])
+def check_auth():
+    """Check authentication status"""
+    try:
+        is_authenticated = controller.remote_controller.check_authentication()
+        return jsonify({
+            'success': True,
+            'is_authenticated': is_authenticated,
+            'provider': controller.remote_provider
+        })
+    except Exception as e:
+        logger.error(f"Error checking auth: {e}")
+        return jsonify({'success': False, 'is_authenticated': False, 'error': str(e)})
+
+@app.route('/api/test_channel', methods=['POST'])
+def test_channel():
+    """Test channel change"""
+    try:
+        data = request.json
+        channel = data.get('channel')
+        
+        if not channel:
+            return jsonify({'success': False, 'message': 'Channel number required'})
+        
+        if not controller.remote_controller.is_authenticated:
+            return jsonify({'success': False, 'message': 'Not authenticated. Please authenticate first.'})
+        
+        success = controller.remote_controller.change_channel(int(channel))
+        if success:
+            controller.current_channel = int(channel)
+            return jsonify({'success': True, 'message': f'Changed to channel {channel}'})
+        else:
+            return jsonify({'success': False, 'message': f'Failed to change to channel {channel}'})
+    except Exception as e:
+        logger.error(f"Error testing channel: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/set_provider', methods=['POST'])
+def set_provider():
+    """Set remote provider (Rogers/Xfinity/Shaw)"""
+    try:
+        data = request.json
+        provider = data.get('provider', 'ROGERS').upper()
+        
+        if provider not in REMOTE_PROVIDERS:
+            return jsonify({'success': False, 'message': f'Invalid provider. Must be one of: {", ".join(REMOTE_PROVIDERS.keys())}'})
+        
+        # Close existing controller
+        controller.remote_controller.close()
+        
+        # Create new controller with new provider
+        controller.remote_controller = RogersRemoteController(provider)
+        controller.remote_provider = provider
+        
+        return jsonify({
+            'success': True,
+            'message': f'Provider set to {provider}',
+            'provider': provider,
+            'remote_url': controller.remote_controller.remote_url
+        })
+    except Exception as e:
+        logger.error(f"Error setting provider: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/start', methods=['POST'])
+def start_monitoring():
+    """Start monitoring - automatically changes channels"""
+    if not controller.games:
+        return jsonify({'success': False, 'message': 'No games configured'})
+    
+    if not controller.remote_controller.is_authenticated:
+        return jsonify({
+            'success': False, 
+            'message': 'Not authenticated. Please authenticate with remote first.',
+            'is_running': False
+        })
+    
+    success = controller.start_monitoring()
+    if success:
+        logger.info(f"Monitoring started. is_running: {controller.is_running}")
+        # Switch to headless mode for background operation
+        controller.remote_controller.headless = True
+        return jsonify({
+            'success': True, 
+            'message': 'Monitoring started successfully',
+            'is_running': controller.is_running
+        })
+    else:
+        return jsonify({
+            'success': False, 
+            'message': 'Monitoring already running or failed to start',
+            'is_running': controller.is_running
+        })
 
 if __name__ == '__main__':
     print("🏈 NFL Redzone TV Controller")
