@@ -9,13 +9,15 @@ import requests
 import time
 import json
 import threading
+import os
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
-from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask import Flask, render_template, request, jsonify, redirect, url_for, g
+from flask_cors import CORS
 import logging
 
-# Configure logging
+# Configure logging first
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -26,17 +28,74 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Firebase Admin for multi-user authentication
+try:
+    import firebase_admin
+    from firebase_admin import credentials, auth
+    FIREBASE_AVAILABLE = True
+except ImportError:
+    FIREBASE_AVAILABLE = False
+    logger.warning("firebase-admin not installed. Multi-user support disabled.")
+
 app = Flask(__name__)
+# Enable CORS for all routes (allows Expo web app to connect)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+# Initialize Firebase Admin (optional - for multi-user support)
+firebase_initialized = False
+if FIREBASE_AVAILABLE:
+    try:
+        # Check for Firebase credentials file or use default credentials
+        cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        if cred_path and os.path.exists(cred_path):
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred)
+        else:
+            # Try to use default credentials (e.g., from Cloud Run)
+            try:
+                firebase_admin.initialize_app()
+            except Exception as e:
+                logger.warning(f"Firebase Admin initialization failed (non-critical): {e}")
+                logger.info("Multi-user support disabled. Server will use single shared controller.")
+        
+        firebase_initialized = True
+        logger.info("Firebase Admin initialized successfully - multi-user support enabled")
+    except Exception as e:
+        logger.warning(f"Could not initialize Firebase Admin: {e}")
+        logger.info("Server will continue with single-user mode (backward compatible)")
+
+def get_user_from_token() -> Optional[str]:
+    """Extract and verify Firebase token from request, return user_id"""
+    if not firebase_initialized:
+        return None
+    
+    try:
+        # Get token from Authorization header
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return None
+        
+        token = auth_header[7:]  # Remove 'Bearer ' prefix
+        
+        # Verify token with Firebase
+        decoded_token = auth.verify_id_token(token)
+        user_id = decoded_token['uid']
+        logger.debug(f"Authenticated user: {user_id}")
+        return user_id
+    except Exception as e:
+        logger.debug(f"Token verification failed: {e}")
+        return None
 
 @dataclass
 class Game:
-    """Represents an NFL game with its details"""
+    """Represents a football game (NFL or College Football) with its details"""
     event_id: str
     home_team: str
     away_team: str
-    channel: int
-    priority: int
+    league: str  # 'nfl' or 'college-football'
+    # Note: priority and channel are stored client-side in Firebase, not on server
     is_live: bool = False
+    possession_team: Optional[str] = None  # Team that currently has the ball (home_team or away_team)
     in_redzone: bool = False
     last_redzone_team: Optional[str] = None
     last_redzone_time: Optional[str] = None
@@ -46,6 +105,7 @@ class Game:
     last_play_text: Optional[str] = None
     is_timeout: bool = False
     timeout_start_time: Optional[float] = None
+    last_timeout_play_sequence: Optional[str] = None  # Track which play had the timeout
     is_end_of_period: bool = False
     home_score: int = 0
     away_score: int = 0
@@ -53,30 +113,64 @@ class Game:
     last_away_score: int = 0
     score_just_changed: bool = False
     score_change_time: Optional[float] = None
+    last_score_change_play_sequence: Optional[str] = None  # Track which play had the score change
     quarter: int = 0
     clock_seconds: int = 0
-    game_excitement_score: float = 0.0
+    down: Optional[int] = None  # Current down (1-4)
+    distance: Optional[int] = None  # Yards to go (e.g., 1, 10)
+    game_excitement_score: float = 0.0  # Calculated by server based on game state
 
 class ESPNClient:
     """Client for interacting with ESPN API v3"""
     
-    def __init__(self):
-        self.scoreboard_url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
-        self.summary_url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary"
+    # League configuration
+    LEAGUES = {
+        'nfl': {
+            'name': 'NFL',
+            'scoreboard_url': 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard',
+            'summary_url': 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary',
+            'core_url': 'http://sports.core.api.espn.com/v2/sports/football/leagues/nfl'
+        },
+        'college-football': {
+            'name': 'College Football',
+            'scoreboard_url': 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard',
+            'summary_url': 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/summary',
+            'core_url': 'http://sports.core.api.espn.com/v2/sports/football/leagues/college-football'
+        }
+    }
+    
+    def __init__(self, league='nfl'):
+        """
+        Initialize ESPN client for a specific league
+        
+        Args:
+            league: 'nfl' or 'college-football'
+        """
+        self.league = league.lower()
+        if self.league not in self.LEAGUES:
+            logger.warning(f"Unknown league '{league}', defaulting to 'nfl'")
+            self.league = 'nfl'
+        
+        league_config = self.LEAGUES[self.league]
+        self.scoreboard_url = league_config['scoreboard_url']
+        self.summary_url = league_config['summary_url']
+        self.core_url = league_config['core_url']
+        self.league_name = league_config['name']
+        
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
         })
     
     def get_live_games(self) -> List[Dict]:
-        """Fetch all current NFL games from scoreboard"""
+        """Fetch all current games from scoreboard"""
         try:
             response = self.session.get(self.scoreboard_url, timeout=10)
             response.raise_for_status()
             data = response.json()
             return data.get('events', [])
         except Exception as e:
-            logger.error(f"Error fetching live games: {e}")
+            logger.error(f"Error fetching live games for {self.league_name}: {e}")
             return []
     
     def get_game_summary(self, event_id: str) -> Optional[Dict]:
@@ -87,7 +181,7 @@ class ESPNClient:
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            logger.error(f"Error fetching game summary for {event_id}: {e}")
+            logger.error(f"Error fetching game summary for {event_id} ({self.league_name}): {e}")
             return None
     
     def get_game_situation(self, event_id: str) -> Optional[Dict]:
@@ -106,7 +200,7 @@ class ESPNClient:
             
             return None
         except Exception as e:
-            logger.error(f"Error fetching game situation for {event_id}: {e}")
+            logger.error(f"Error fetching game situation for {event_id} ({self.league_name}): {e}")
             return None
 
 # Remote provider URLs
@@ -116,269 +210,43 @@ REMOTE_PROVIDERS = {
     'SHAW': 'https://webremote.shaw.ca/remote',
 }
 
-class RogersRemoteController:
-    """Controller for TV provider web remote (Rogers/Xfinity/Shaw)"""
-    
-    def __init__(self, provider='ROGERS'):
-        self.provider = provider.upper()
-        self.remote_url = REMOTE_PROVIDERS.get(self.provider, REMOTE_PROVIDERS['ROGERS'])
-        self.driver = None
-        self.wait = None
-        self.is_authenticated = False
-        self.headless = True  # Run headless by default for server deployment
-    
-    def setup_driver(self, headless=True):
-        """Initialize Chrome driver with appropriate options"""
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
-            from selenium.common.exceptions import TimeoutException, NoSuchElementException
-            
-            chrome_options = Options()
-            if headless:
-                chrome_options.add_argument("--headless")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_argument("--window-size=1920,1080")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            chrome_options.add_experimental_option('useAutomationExtension', False)
-            chrome_options.add_argument("user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            
-            self.driver = webdriver.Chrome(options=chrome_options)
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            self.wait = WebDriverWait(self.driver, 10)
-            self.headless = headless
-            
-            # Store for later use
-            self.By = By
-            self.EC = EC
-            self.TimeoutException = TimeoutException
-            self.NoSuchElementException = NoSuchElementException
-            
-            return True
-        except Exception as e:
-            logger.error(f"Error setting up Chrome driver: {e}")
-            logger.error("Make sure Chrome and ChromeDriver are installed")
-            return False
-    
-    def open_remote(self):
-        """Open remote URL and wait for potential authentication"""
-        if not self.driver:
-            if not self.setup_driver(self.headless):
-                return False
-        
-        try:
-            self.driver.get(self.remote_url)
-            logger.info(f"Opened {self.provider} remote: {self.remote_url}")
-            time.sleep(3)  # Wait for page to load
-            return True
-        except Exception as e:
-            logger.error(f"Error opening remote: {e}")
-            return False
-    
-    def check_authentication(self) -> bool:
-        """Check if user is authenticated by looking for remote buttons"""
-        if not self.driver:
-            return False
-        
-        try:
-            # Look for number buttons - if they exist, we're authenticated
-            button = self.wait.until(
-                self.EC.presence_of_element_located((self.By.CSS_SELECTOR, '[data-vcode="NUMBER_1"]'))
-            )
-            self.is_authenticated = True
-            logger.info(f"Authentication confirmed for {self.provider}")
-            return True
-        except self.TimeoutException:
-            self.is_authenticated = False
-            logger.warning(f"Not authenticated with {self.provider} - remote buttons not found")
-            return False
-        except Exception as e:
-            logger.error(f"Error checking authentication: {e}")
-            return False
-    
-    def change_channel(self, channel_number: int) -> bool:
-        """Change TV channel to specified number"""
-        if not self.is_authenticated:
-            logger.error(f"Not authenticated with {self.provider} remote")
-            return False
-        
-        if not self.driver:
-            if not self.open_remote():
-                return False
-        
-        try:
-            channel_str = str(channel_number)
-            logger.info(f"Changing channel to {channel_number}")
-            
-            # Press each digit button
-            for digit in channel_str:
-                button_id = f"NUMBER_{digit}"
-                try:
-                    button = self.wait.until(
-                        self.EC.element_to_be_clickable((self.By.CSS_SELECTOR, f'[data-vcode="{button_id}"]'))
-                    )
-                    button.click()
-                    time.sleep(0.4)  # Delay between button presses
-                except self.TimeoutException:
-                    logger.error(f"Could not find button for digit {digit}")
-                    return False
-            
-            # Press ENTER to confirm channel change
-            try:
-                enter_button = self.wait.until(
-                    self.EC.element_to_be_clickable((self.By.CSS_SELECTOR, '[data-vcode="ENTER"]'))
-                )
-                enter_button.click()
-                logger.info(f"Successfully changed channel to {channel_number}")
-                time.sleep(0.5)
-                return True
-            except self.TimeoutException:
-                logger.error("Could not find ENTER button")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error changing channel to {channel_number}: {e}")
-            return False
-    
-    def close(self):
-        """Close the browser driver"""
-        if self.driver:
-            try:
-                self.driver.quit()
-                self.driver = None
-                self.wait = None
-            except:
-                pass
 
 class NFLRedzoneController:
-    """Main controller for NFL redzone monitoring and TV control"""
+    """Main controller for NFL and College Football game data and excitement score calculation"""
     
-    def __init__(self, remote_provider='ROGERS'):
-        self.espn_client = ESPNClient()
-        self.remote_controller = RogersRemoteController(remote_provider)
-        self.remote_provider = remote_provider
-        self.games: Dict[str, Game] = {}
-        self.channel_mapping: Dict[int, str] = {}
-        self.current_channel: Optional[int] = None
-        self.is_running = False
-        self.monitoring_thread = None
-        self.status_logs = []
-        self.max_logs = 100
-        self.config_file = 'nfl_controller_config.json'
-        self.load_configuration()
+    def __init__(self):
+        """Initialize controller - supports both NFL and College Football"""
+        # Create ESPN clients for both leagues
+        self.nfl_client = ESPNClient('nfl')
+        self.college_client = ESPNClient('college-football')
+        # Note: Channel mappings and priorities are stored client-side in Firebase, not on server
     
-    def add_log(self, message: str, level: str = "info"):
-        """Add a log message to the status logs"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.status_logs.append({
-            "timestamp": timestamp,
-            "level": level,
-            "message": message
-        })
-        # Keep only the last 100 logs
-        if len(self.status_logs) > self.max_logs:
-            self.status_logs = self.status_logs[-self.max_logs:]
+    # Note: Configuration (channels, priorities, game-to-channel mappings) 
+    # is now stored client-side in Firebase, not on the server
     
-    def save_configuration(self):
-        """Save current configuration to file"""
-        try:
-            config = {
-                'channels': list(self.channel_mapping.keys()),
-                'games': []
-            }
-            
-            # Save game mappings
-            for game_key, game in self.games.items():
-                config['games'].append({
-                    'event_id': game.event_id,
-                    'home_team': game.home_team,
-                    'away_team': game.away_team,
-                    'channel': game.channel,
-                    'priority': game.priority
-                })
-            
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=2)
-            
-            logger.info(f"Configuration saved to {self.config_file}")
-        except Exception as e:
-            logger.error(f"Error saving configuration: {e}")
-    
-    def load_configuration(self):
-        """Load configuration from file"""
-        try:
-            import os
-            if not os.path.exists(self.config_file):
-                logger.info("No saved configuration found")
-                return
-            
-            with open(self.config_file, 'r') as f:
-                config = json.load(f)
-            
-            # Load channels
-            if 'channels' in config and config['channels']:
-                channels = config['channels']
-                self.channel_mapping = {channels[i]: f"game_{i+1}" for i in range(len(channels))}
-                logger.info(f"Loaded channels: {channels}")
-                self.add_log(f"Loaded saved channels: {', '.join(map(str, channels))}")
-            
-            # Load game mappings
-            if 'games' in config and config['games']:
-                for game_data in config['games']:
-                    game = Game(
-                        event_id=game_data['event_id'],
-                        home_team=game_data['home_team'],
-                        away_team=game_data['away_team'],
-                        channel=game_data['channel'],
-                        priority=game_data['priority'],
-                        is_live=True
-                    )
-                    game_key = f"{game.away_team} @ {game.home_team}"
-                    self.games[game_key] = game
-                    logger.info(f"Loaded game: {game_key} -> Channel {game.channel}")
-                
-                self.add_log(f"Loaded {len(config['games'])} saved game mappings")
-        except Exception as e:
-            logger.error(f"Error loading configuration: {e}")
-    
-    def setup_channels(self, channels: List[int]) -> bool:
-        """Set up channel mapping"""
-        if len(channels) < 2:
-            self.add_log("At least 2 channels are required", "error")
-            return False
+    def get_live_games(self) -> Dict[str, Game]:
+        """Fetch all current live games from both NFL and College Football and calculate excitement scores"""
+        games: Dict[str, Game] = {}
         
-        self.channel_mapping = {channels[i]: f"game_{i+1}" for i in range(len(channels))}
-        logger.info(f"Channel mapping configured: {self.channel_mapping}")
-        self.add_log(f"Configured {len(channels)} channels")
-        self.save_configuration()
-        return True
-    
-    def discover_games(self) -> bool:
-        """Discover current live games and map them to channels"""
-        self.add_log("Discovering live NFL games...")
-        live_games_data = self.espn_client.get_live_games()
-        
-        if not live_games_data:
-            self.add_log("No live games found", "warning")
-            return False
-        
-        # Clear existing games
-        self.games.clear()
-        
-        # Get channel priorities
-        channels = list(self.channel_mapping.keys())
-        channels.sort()  # Lower channel number = higher priority
-        
-        games_found = 0
-        for i, game_data in enumerate(live_games_data[:len(channels)]):
+        # Discover NFL games
+        nfl_games = self.nfl_client.get_live_games()
+        for game_data in nfl_games:
             try:
-                event_id = game_data['$ref'].split('/')[-1].split('?')[0]
-                summary = self.espn_client.get_game_summary(event_id)
+                # ESPN API v3 returns events with 'id' field, not '$ref'
+                event_id = game_data.get('id')
+                if not event_id:
+                    continue
+                
+                # Check if game is actually live from the event status
+                status = game_data.get('status', {})
+                status_type = status.get('type', {})
+                is_live = status_type.get('state', '') == 'in'
+                
+                # Only process live games
+                if not is_live:
+                    continue
+                
+                summary = self.nfl_client.get_game_summary(event_id)
                 
                 if summary and 'boxscore' in summary:
                     teams = summary['boxscore'].get('teams', [])
@@ -390,33 +258,80 @@ class NFLRedzoneController:
                             event_id=event_id,
                             home_team=home_team,
                             away_team=away_team,
-                            channel=channels[i],
-                            priority=i + 1,
-                            is_live=True
+                            league='nfl',
+                            is_live=is_live
                         )
                         
                         game_key = f"{away_team} @ {home_team}"
-                        self.games[game_key] = game
-                        self.add_log(f"Mapped {game_key} to channel {channels[i]} (priority {i+1})")
-                        games_found += 1
+                        games[game_key] = game
             except Exception as e:
-                logger.error(f"Error processing game: {e}")
+                logger.error(f"Error processing NFL game: {e}")
                 continue
         
-        self.add_log(f"Discovered {games_found} live games")
-        return games_found > 0
+        # Discover College Football games
+        college_games = self.college_client.get_live_games()
+        for game_data in college_games:
+            try:
+                # ESPN API v3 returns events with 'id' field, not '$ref'
+                event_id = game_data.get('id')
+                if not event_id:
+                    continue
+                
+                # Check if game is actually live from the event status
+                status = game_data.get('status', {})
+                status_type = status.get('type', {})
+                is_live = status_type.get('state', '') == 'in'
+                
+                # Only process live games
+                if not is_live:
+                    continue
+                
+                summary = self.college_client.get_game_summary(event_id)
+                
+                if summary and 'boxscore' in summary:
+                    teams = summary['boxscore'].get('teams', [])
+                    if len(teams) >= 2:
+                        home_team = teams[1].get('team', {}).get('displayName', 'Unknown')
+                        away_team = teams[0].get('team', {}).get('displayName', 'Unknown')
+                        
+                        game = Game(
+                            event_id=event_id,
+                            home_team=home_team,
+                            away_team=away_team,
+                            league='college-football',
+                            is_live=is_live
+                        )
+                        
+                        game_key = f"{away_team} @ {home_team}"
+                        games[game_key] = game
+            except Exception as e:
+                logger.error(f"Error processing College Football game: {e}")
+                continue
+        
+        # Update game states and calculate excitement scores for all games
+        for game_key, game in games.items():
+            self.update_game_state(game)
+            self.check_redzone_activity(game)
+            self.calculate_excitement_score(game)
+        
+        # Filter to only return live games (safety check)
+        live_games = {key: game for key, game in games.items() if game.is_live}
+        
+        return live_games
     
     def get_all_games_today(self) -> List[Dict]:
-        """Get all NFL games for today (not just live ones)"""
+        """Get all games for today from both NFL and College Football (not just live ones)"""
         try:
             from datetime import datetime
             today = datetime.now().strftime("%Y%m%d")
-            url = f"https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates={today}"
-            response = self.espn_client.session.get(url, timeout=10)
+            games = []
+            
+            # Get NFL games
+            nfl_url = f"{self.nfl_client.scoreboard_url}?dates={today}"
+            response = self.nfl_client.session.get(nfl_url, timeout=10)
             response.raise_for_status()
             data = response.json()
             
-            games = []
             for event in data.get('events', []):
                 try:
                     event_id = event['id']
@@ -433,57 +348,160 @@ class NFLRedzoneController:
                                     'event_id': event_id,
                                     'home_team': home.get('team', {}).get('displayName', 'Unknown'),
                                     'away_team': away.get('team', {}).get('displayName', 'Unknown'),
+                                    'league': 'nfl',
                                     'status': event.get('status', {}).get('type', {}).get('name', 'Unknown'),
                                     'is_live': event.get('status', {}).get('type', {}).get('state', '') == 'in'
                                 })
                 except Exception as e:
-                    logger.error(f"Error parsing game: {e}")
+                    logger.error(f"Error parsing NFL game: {e}")
+                    continue
+            
+            # Get College Football games
+            college_url = f"{self.college_client.scoreboard_url}?dates={today}"
+            response = self.college_client.session.get(college_url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            for event in data.get('events', []):
+                try:
+                    event_id = event['id']
+                    competitions = event.get('competitions', [])
+                    if competitions:
+                        comp = competitions[0]
+                        competitors = comp.get('competitors', [])
+                        if len(competitors) >= 2:
+                            home = next((c for c in competitors if c.get('homeAway') == 'home'), None)
+                            away = next((c for c in competitors if c.get('homeAway') == 'away'), None)
+                            
+                            if home and away:
+                                games.append({
+                                    'event_id': event_id,
+                                    'home_team': home.get('team', {}).get('displayName', 'Unknown'),
+                                    'away_team': away.get('team', {}).get('displayName', 'Unknown'),
+                                    'league': 'college-football',
+                                    'status': event.get('status', {}).get('type', {}).get('name', 'Unknown'),
+                                    'is_live': event.get('status', {}).get('type', {}).get('state', '') == 'in'
+                                })
+                except Exception as e:
+                    logger.error(f"Error parsing College Football game: {e}")
                     continue
             
             return games
         except Exception as e:
             logger.error(f"Error fetching all games: {e}")
             return []
-    
-    def map_game_to_channel(self, event_id: str, channel: int, priority: int) -> bool:
-        """Manually map a specific game to a channel"""
-        try:
-            summary = self.espn_client.get_game_summary(event_id)
-            
-            if summary and 'boxscore' in summary:
-                teams = summary['boxscore'].get('teams', [])
-                if len(teams) >= 2:
-                    home_team = teams[1].get('team', {}).get('displayName', 'Unknown')
-                    away_team = teams[0].get('team', {}).get('displayName', 'Unknown')
-                    
-                    game = Game(
-                        event_id=event_id,
-                        home_team=home_team,
-                        away_team=away_team,
-                        channel=channel,
-                        priority=priority,
-                        is_live=True
-                    )
-                    
-                    game_key = f"{away_team} @ {home_team}"
-                    self.games[game_key] = game
-                    self.add_log(f"Mapped {game_key} to channel {channel} (priority {priority})")
-                    self.save_configuration()
-                    return True
-        except Exception as e:
-            logger.error(f"Error mapping game: {e}")
-            return False
         
-        return False
+    # Note: Game-to-channel mapping is now handled client-side in Firebase
     
     def update_game_state(self, game: Game) -> None:
-        """Update comprehensive game state including scores, timeouts, clock"""
-        situation = self.espn_client.get_game_situation(game.event_id)
+        """Update comprehensive game state including scores, timeouts, clock, and possession"""
+        # Use the appropriate ESPN client based on game's league
+        espn_client = self.nfl_client if game.league == 'nfl' else self.college_client
+        
+        # Get game summary first (for scores, clock, and possessionText)
+        summary = espn_client.get_game_summary(game.event_id)
+        
+        # Try to get possessionText from summary API first (most reliable)
+        possession_text = ''
+        if summary:
+            try:
+                # Path: data["competitions"][0]["situation"]["possessionText"]
+                header = summary.get('header', {})
+                competitions = header.get('competitions', [])
+                if competitions:
+                    situation = competitions[0].get('situation', {})
+                    possession_text = situation.get('possessionText', '')
+            except (KeyError, IndexError, AttributeError) as e:
+                logger.debug(f"Could not get possessionText from summary API: {e}")
+        
+        # Fallback to scoreboard API if summary didn't have possessionText
+        situation = None
+        if not possession_text:
+            situation = espn_client.get_game_situation(game.event_id)
+            if situation:
+                possession_text = situation.get('possessionText', '')
+        
+        # If we still don't have situation data, get it from scoreboard for other fields
         if not situation:
+            situation = espn_client.get_game_situation(game.event_id)
+        
+        if not situation and not summary:
             return
         
-        # Get game summary for scores and clock
-        summary = self.espn_client.get_game_summary(game.event_id)
+        # Extract other play information from situation (if available)
+        last_play = situation.get('lastPlay', {}) if situation else {}
+        team_with_ball = last_play.get('team', {}) if last_play else {}
+        
+        # Determine which team has possession
+        # Method 1: PRIMARY - Use possessionText from ESPN API (shorthand team name like "DAL", "BYU", etc.)
+        if possession_text:
+            possession_upper = possession_text.upper().strip()
+            home_upper = game.home_team.upper()
+            away_upper = game.away_team.upper()
+            
+            # Since possessionText is a shorthand (e.g., "DAL", "BYU"), we need to match it against team names
+            # Check if shorthand matches home team (e.g., "DAL" in "Dallas Cowboys")
+            if (possession_upper in home_upper or 
+                any(word.startswith(possession_upper) for word in home_upper.split() if len(possession_upper) >= 2) or
+                any(possession_upper in word for word in home_upper.split() if len(word) >= len(possession_upper))):
+                game.possession_team = game.home_team
+                logger.debug(f"Determined possession from possessionText: {game.home_team} (text: '{possession_text}')")
+            # Check if shorthand matches away team
+            elif (possession_upper in away_upper or 
+                  any(word.startswith(possession_upper) for word in away_upper.split() if len(possession_upper) >= 2) or
+                  any(possession_upper in word for word in away_upper.split() if len(word) >= len(possession_upper))):
+                game.possession_team = game.away_team
+                logger.debug(f"Determined possession from possessionText: {game.away_team} (text: '{possession_text}')")
+        
+        # Method 2: Fallback to lastPlay.team if possessionText didn't work
+        if not game.possession_team and team_with_ball:
+            team_id = team_with_ball.get('id')
+            team_name = team_with_ball.get('displayName', '')
+            
+            # Match team name to home or away team
+            if team_name and (team_name in game.home_team or game.home_team in team_name):
+                game.possession_team = game.home_team
+                logger.debug(f"Determined possession from lastPlay.team: {game.home_team}")
+            elif team_name and (team_name in game.away_team or game.away_team in team_name):
+                game.possession_team = game.away_team
+                logger.debug(f"Determined possession from lastPlay.team: {game.away_team}")
+        
+        # Method 3: Fallback to parsing last_play_text if other methods didn't work
+        if not game.possession_team and last_play:
+            play_text = last_play.get('text', '')
+            if play_text:
+                import re
+                # Look for patterns like "to the PSU13", "at DAL20", "to WSH5", etc.
+                # Extract team abbreviation from location (e.g., "PSU" from "PSU13")
+                location_pattern = r'to\s+(?:the\s+)?([A-Z]{2,4})\d+|at\s+([A-Z]{2,4})\d+'
+                match = re.search(location_pattern, play_text, re.IGNORECASE)
+                
+                if match:
+                    # Get the team abbreviation (either from first or second group)
+                    team_abbrev = (match.group(1) or match.group(2)).upper()
+                    
+                    # Match abbreviation against team names
+                    home_upper = game.home_team.upper()
+                    away_upper = game.away_team.upper()
+                    
+                    # Check if abbreviation matches home team
+                    # Common patterns: "PSU" in "Penn State", "DAL" in "Dallas Cowboys", etc.
+                    if (team_abbrev in home_upper or 
+                        any(word.startswith(team_abbrev[:2]) for word in home_upper.split() if len(word) >= 2)):
+                        # Ball is on home team's side, so away team has possession
+                        game.possession_team = game.away_team
+                        logger.debug(f"Determined possession from play text: {game.away_team} (ball at {team_abbrev} yard line)")
+                    # Check if abbreviation matches away team
+                    elif (team_abbrev in away_upper or 
+                          any(word.startswith(team_abbrev[:2]) for word in away_upper.split() if len(word) >= 2)):
+                        # Ball is on away team's side, so home team has possession
+                        game.possession_team = game.home_team
+                        logger.debug(f"Determined possession from play text: {game.home_team} (ball at {team_abbrev} yard line)")
+        
+        # Get game summary for scores and clock (if not already fetched)
+        if not summary:
+            summary = espn_client.get_game_summary(game.event_id)
+        
         if summary:
             header = summary.get('header', {})
             competitions = header.get('competitions', [{}])[0]
@@ -499,6 +517,7 @@ class NFLRedzoneController:
                         game.score_just_changed = True
                         game.score_change_time = time.time()
                         game.last_home_score = game.home_score  # Store previous score
+                        # Store the play sequence when score changed (will be set later)
                         logger.info(f"Score changed for {game.home_team} vs {game.away_team}: {game.last_home_score} -> {score} (commercials coming, reducing priority)")
                     game.home_score = score
                 else:
@@ -508,6 +527,7 @@ class NFLRedzoneController:
                         game.score_just_changed = True
                         game.score_change_time = time.time()
                         game.last_away_score = game.away_score  # Store previous score
+                        # Store the play sequence when score changed (will be set later)
                         logger.info(f"Score changed for {game.home_team} vs {game.away_team}: {game.last_away_score} -> {score} (commercials coming, reducing priority)")
                     game.away_score = score
             
@@ -532,26 +552,78 @@ class NFLRedzoneController:
         play_type_text = play_type.get('text', '').lower()
         play_text = last_play.get('text', '').lower()
         
+        # Get current play ID for tracking
+        play_id = last_play.get('id', '')
+        
         # Detect timeouts
         if 'timeout' in play_type_text or 'timeout' in play_text:
             if not game.is_timeout:
                 game.is_timeout = True
                 game.timeout_start_time = time.time()
+                game.last_timeout_play_sequence = play_id
                 logger.info(f"Timeout detected for {game.home_team} vs {game.away_team} - commercials coming, reducing priority")
         else:
-            # Check if timeout has expired (3 minutes)
-            if game.is_timeout and game.timeout_start_time:
-                if time.time() - game.timeout_start_time > 180:  # 3 minutes
+            # No timeout in current play - check if we should clear timeout flag
+            if game.is_timeout:
+                # Clear timeout if:
+                # 1. A new play has occurred (different play sequence) - play has resumed
+                # 2. OR timeout has expired (2 minutes - timeouts are usually shorter)
+                # 3. OR play text has changed (indicating a new play)
+                should_clear = False
+                if play_id and game.last_timeout_play_sequence and play_id != game.last_timeout_play_sequence:
+                    # New play detected - timeout is over
+                    should_clear = True
+                    logger.info(f"Timeout cleared for {game.home_team} vs {game.away_team} - new play detected (play resumed)")
+                elif game.timeout_start_time and time.time() - game.timeout_start_time > 120:  # 2 minutes (timeouts are usually shorter)
+                    # Timeout expired after 2 minutes
+                    should_clear = True
+                    logger.info(f"Timeout expired for {game.home_team} vs {game.away_team} (2 minutes)")
+                elif play_text and hasattr(game, '_last_timeout_play_text') and play_text != game._last_timeout_play_text:
+                    # Play text changed - new play occurred, timeout is over
+                    should_clear = True
+                    logger.info(f"Timeout cleared for {game.home_team} vs {game.away_team} - play text changed (play resumed)")
+                
+                if should_clear:
                     game.is_timeout = False
                     game.timeout_start_time = None
-                    logger.info(f"Timeout expired for {game.home_team} vs {game.away_team}")
+                    game.last_timeout_play_sequence = None
+                    if hasattr(game, '_last_timeout_play_text'):
+                        delattr(game, '_last_timeout_play_text')
+                else:
+                    # Store the play text when timeout occurred to detect changes
+                    if not hasattr(game, '_last_timeout_play_text'):
+                        game._last_timeout_play_text = play_text
         
-        # Check if score change timeout has expired (2 minutes for commercials after score)
-        if game.score_just_changed and game.score_change_time:
-            if time.time() - game.score_change_time > 120:  # 2 minutes
+        # Check if score change timeout should be cleared
+        if game.score_just_changed:
+            should_clear_score = False
+            # Clear score change flag if:
+            # 1. A new play has occurred after the score change (different play sequence) - commercial break is over
+            # 2. OR score change timeout has expired (30 seconds - commercial breaks are usually short)
+            # 3. OR play text has changed (indicating a new play)
+            if play_id and game.last_score_change_play_sequence and play_id != game.last_score_change_play_sequence:
+                # New play detected after score change - commercial break is over
+                should_clear_score = True
+                logger.info(f"Score change commercial cleared for {game.home_team} vs {game.away_team} - new play detected (commercial over)")
+            elif game.score_change_time and time.time() - game.score_change_time > 30:  # 30 seconds (commercials are usually short)
+                # Score change timeout expired after 30 seconds
+                should_clear_score = True
+                logger.info(f"Score change timeout expired for {game.home_team} vs {game.away_team} (30 seconds)")
+            elif play_text and hasattr(game, '_last_commercial_play_text') and play_text != game._last_commercial_play_text:
+                # Play text changed - new play occurred, commercial is over
+                should_clear_score = True
+                logger.info(f"Score change commercial cleared for {game.home_team} vs {game.away_team} - play text changed (commercial over)")
+            
+            if should_clear_score:
                 game.score_just_changed = False
                 game.score_change_time = None
-                logger.info(f"Score change timeout expired for {game.home_team} vs {game.away_team}")
+                game.last_score_change_play_sequence = None
+                if hasattr(game, '_last_commercial_play_text'):
+                    delattr(game, '_last_commercial_play_text')
+            else:
+                # Store the play text when score changed to detect changes
+                if not hasattr(game, '_last_commercial_play_text'):
+                    game._last_commercial_play_text = play_text
         
         # Detect end of period (quarter/half)
         game.is_end_of_period = (game.clock_seconds == 0 or 
@@ -583,7 +655,10 @@ class NFLRedzoneController:
     
     def check_redzone_activity(self, game: Game) -> Optional[Tuple[str, int]]:
         """Check if any team is in the redzone using ESPN v3 situation data"""
-        situation = self.espn_client.get_game_situation(game.event_id)
+        # Use the appropriate ESPN client based on game's league
+        espn_client = self.nfl_client if game.league == 'nfl' else self.college_client
+        
+        situation = espn_client.get_game_situation(game.event_id)
         if not situation:
             game.in_redzone = False
             return None
@@ -648,11 +723,39 @@ class NFLRedzoneController:
         possession_text = situation.get('possessionText', '')
         down_distance = situation.get('downDistanceText', '')
         
+        # Parse down and distance from downDistanceText (e.g., "1st & 10", "4th & 2", etc.)
+        game.down = None
+        game.distance = None
+        if down_distance:
+            down_distance_lower = down_distance.lower()
+            # Parse down
+            if '1st' in down_distance_lower or 'first' in down_distance_lower:
+                game.down = 1
+            elif '2nd' in down_distance_lower or 'second' in down_distance_lower:
+                game.down = 2
+            elif '3rd' in down_distance_lower or 'third' in down_distance_lower:
+                game.down = 3
+            elif '4th' in down_distance_lower or 'fourth' in down_distance_lower:
+                game.down = 4
+            
+            # Parse distance (yards to go) - look for "& X" pattern
+            import re
+            distance_match = re.search(r'&\s*(\d+)', down_distance)
+            if distance_match:
+                try:
+                    game.distance = int(distance_match.group(1))
+                except ValueError:
+                    pass
+        
         # Store play information
         game.play_sequence = play_id
         game.last_play_text = play_text[:100]
         game.play_timestamp = datetime.now().isoformat()
         game.yards_to_endzone = yards_to_endzone
+        
+        # If score just changed, store the play sequence for tracking (if not already set)
+        if game.score_just_changed and not game.last_score_change_play_sequence:
+            game.last_score_change_play_sequence = play_id
         
         # Check if this is the same play we saw last time (stale data detection)
         if hasattr(game, '_last_play_id') and game._last_play_id == play_id:
@@ -663,6 +766,30 @@ class NFLRedzoneController:
         
         # Check if in redzone (< 30 yards to endzone OR ESPN marks it)
         if (yards_to_endzone is not None and yards_to_endzone < 30) or is_redzone_flag:
+            # If team_name is still 'Unknown', try to use possession_team as fallback
+            if team_name == 'Unknown' and game.possession_team:
+                team_name = game.possession_team
+                logger.debug(f"Using possession_team as fallback for redzone: {team_name}")
+            
+            # If still unknown and we have possession_text, try to parse it
+            if team_name == 'Unknown' and possession_text:
+                # possession_text is usually a shorthand like "DAL", "BAL", etc.
+                # Try to match it against home/away team names
+                possession_upper = possession_text.upper().strip()
+                home_upper = game.home_team.upper()
+                away_upper = game.away_team.upper()
+                
+                # Check if shorthand matches home team
+                if (possession_upper in home_upper or 
+                    any(word.startswith(possession_upper) for word in home_upper.split() if len(possession_upper) >= 2)):
+                    team_name = game.home_team
+                    logger.debug(f"Matched possession_text '{possession_text}' to home team: {team_name}")
+                # Check if shorthand matches away team
+                elif (possession_upper in away_upper or 
+                      any(word.startswith(possession_upper) for word in away_upper.split() if len(possession_upper) >= 2)):
+                    team_name = game.away_team
+                    logger.debug(f"Matched possession_text '{possession_text}' to away team: {team_name}")
+            
             # Update game status
             game.in_redzone = True
             game.last_redzone_team = team_name
@@ -677,169 +804,94 @@ class NFLRedzoneController:
         
         return None
     
-    def determine_target_channel(self) -> Optional[int]:
-        """Smart channel selection based on redzone, timeouts, and excitement"""
+    def calculate_excitement_score(self, game: Game) -> None:
+        """Calculate excitement score for a single game based on redzone, timeouts, downs, and game state"""
+        excitement = 0.0
         
-        # First, update all game states
-        for game_key, game in self.games.items():
-            self.update_game_state(game)
-            self.check_redzone_activity(game)
+        # Initialize commercial penalty
+        commercial_penalty = 0
         
-        # Build list of potential channels to watch
-        candidates = []
-        
-        for game_key, game in self.games.items():
-            score = 0
-            reason = []
+        # Redzone is highest priority
+        if game.in_redzone:
+            excitement += 1000  # Massive score for redzone
+            if game.yards_to_endzone:
+                excitement += (30 - game.yards_to_endzone) * 10  # Closer = higher score
             
-            # Skip if timeout or end of period (unless redzone)
-            if game.is_timeout and not game.in_redzone:
-                logger.debug(f"Skipping {game_key} - timeout")
-                continue
-            
-            if game.is_end_of_period and not game.in_redzone:
-                logger.debug(f"Skipping {game_key} - end of period")
-                continue
-            
-            # Redzone is highest priority (but commercials still reduce priority)
-            if game.in_redzone:
-                score += 1000  # Massive score for redzone
-                reason.append(f"REDZONE {game.last_redzone_team} at {game.yards_to_endzone}yd")
-                
-                # Bonus for closer to goal
-                if game.yards_to_endzone:
-                    score += (30 - game.yards_to_endzone) * 10  # Closer = higher score
+            # Bonus for 4th and 1 (or short) in redzone - team likely going for it!
+            if game.down == 4 and game.distance is not None and game.distance <= 1:
+                excitement += 500  # Huge bonus for 4th and 1 in redzone - very exciting!
+                logger.info(f"4th and {game.distance} in redzone for {game.home_team} vs {game.away_team} - likely going for it, increasing excitement")
+            elif game.down == 4 and game.distance is not None and game.distance <= 3:
+                excitement += 300  # Bonus for 4th and short (2-3 yards) in redzone
+                logger.info(f"4th and {game.distance} in redzone for {game.home_team} vs {game.away_team} - short yardage, increasing excitement")
             
             # Penalty for timeout or score change (commercials coming!)
-            # This penalty applies even to redzone games to avoid watching commercials
-            commercial_penalty = 0
             if game.is_timeout:
                 commercial_penalty = 500  # Large penalty for timeout = commercials
-                reason.append("⏸️ TIMEOUT")
             elif game.score_just_changed:
                 commercial_penalty = 400  # Large penalty for score change = commercials
-                reason.append("🎉 SCORE CHANGED")
-            
-            # Apply commercial penalty (reduce priority significantly)
-            # Even redzone games get penalized when commercials are on
-            score -= commercial_penalty
-            
-            # Add excitement score (close games in 4th quarter)
-            score += game.game_excitement_score
-            if game.game_excitement_score > 20:
-                score_diff = abs(game.home_score - game.away_score)
-                time_min = game.clock_seconds / 60 if game.clock_seconds else 0
-                if game.quarter == 4 and time_min <= 15:
-                    reason.append(f"Close game Q4 {time_min:.1f}min ({game.home_score}-{game.away_score})")
-            
-            # Base priority (lower number = higher base priority)
-            # Invert so priority 1 gets more points than priority 3
-            base_priority_score = (10 - game.priority) * 50
-            score += base_priority_score
-            
-            # If this is current channel, give small bonus (avoid unnecessary switching)
-            if self.current_channel == game.channel:
-                score += 5
-                reason.append("current")
-            
-            if score > 0:
-                candidates.append({
-                    'game': game,
-                    'game_key': game_key,
-                    'channel': game.channel,
-                    'score': score,
-                    'reason': ' + '.join(reason) if reason else 'active'
-                })
         
-        if not candidates:
-            # No good options - check if current channel has timeout
-            if self.current_channel:
-                current_game = next((g for g in self.games.values() if g.channel == self.current_channel), None)
-                if current_game and (current_game.is_timeout or current_game.is_end_of_period):
-                    # Switch to any non-timeout game
-                    for game in self.games.values():
-                        if not game.is_timeout and not game.is_end_of_period:
-                            self.add_log(f"⏸️ Timeout on Ch {self.current_channel} - Switching to Ch {game.channel}")
-                            return game.channel
-            return None
+        # Penalty for 4th down when not in redzone (likely punt = commercial after change of possession)
+        if game.down == 4 and not game.in_redzone:
+            commercial_penalty = max(commercial_penalty, 300)  # Penalty for 4th down punt situation
+            logger.info(f"4th down detected (not in redzone) for {game.home_team} vs {game.away_team} - likely punt, reducing excitement")
         
-        # Sort by score (highest first)
-        candidates.sort(key=lambda x: x['score'], reverse=True)
+        # Apply commercial penalty
+        excitement -= commercial_penalty
         
-        best = candidates[0]
-        game = best['game']
+        # Add base excitement score (close games in 4th quarter)
+        # This is already calculated in update_game_state()
+        excitement += game.game_excitement_score
         
-        # Log the decision
-        if game.in_redzone:
-            self.add_log(f"🔴 {best['reason']} - Ch {best['channel']} (score: {best['score']:.0f})")
-        elif game.game_excitement_score > 20:
-            self.add_log(f"🔥 {best['reason']} - Ch {best['channel']} (score: {best['score']:.0f})")
-        
-        return best['channel']
-    
-    def monitoring_loop(self):
-        """Main monitoring loop - automatically changes channels on server"""
-        logger.info("Starting NFL redzone monitoring...")
-        self.add_log("🏈 Monitoring started!")
-        
-        while self.is_running:
-            try:
-                target_channel = self.determine_target_channel()
-                
-                if target_channel and target_channel != self.current_channel:
-                    # Actually change the channel (server-side control)
-                    if self.remote_controller.is_authenticated:
-                        success = self.remote_controller.change_channel(target_channel)
-                        if success:
-                            self.current_channel = target_channel
-                            self.add_log(f"📺 Changed to channel: {target_channel}")
-                            logger.info(f"Successfully changed channel to {target_channel}")
-                        else:
-                            self.add_log(f"⚠️ Failed to change to channel: {target_channel}", "error")
-                            logger.error(f"Failed to change channel to {target_channel}")
-                    else:
-                        self.add_log(f"⚠️ Not authenticated - cannot change channel", "error")
-                        logger.warning("Not authenticated with remote - cannot change channels")
-                
-                # Wait 30 seconds before next check
-                time.sleep(30)
-                
-            except Exception as e:
-                logger.error(f"Error in monitoring loop: {e}")
-                self.add_log(f"Error: {str(e)}", "error")
-                time.sleep(30)
-        
-        self.add_log("Monitoring stopped")
-    
-    def start_monitoring(self):
-        """Start the monitoring loop in a background thread"""
-        if self.is_running:
-            logger.warning("Monitoring already running")
-            return False
-        
-        self.is_running = True
-        self.monitoring_thread = threading.Thread(target=self.monitoring_loop, daemon=True)
-        self.monitoring_thread.start()
-        logger.info(f"Monitoring thread started. is_running: {self.is_running}")
-        # Verify thread started
-        import time
-        time.sleep(0.1)
-        if self.monitoring_thread.is_alive():
-            logger.info("Monitoring thread confirmed alive")
-        else:
-            logger.error("Monitoring thread failed to start")
-            self.is_running = False
-            return False
-        return True
-    
-    def stop_monitoring(self):
-        """Stop the monitoring loop"""
-        self.is_running = False
-        if self.monitoring_thread:
-            self.monitoring_thread.join(timeout=5)
+        # Update the game's excitement score
+        game.game_excitement_score = excitement
 
-# Global controller instance
+# User Controller Manager - handles per-user controller instances
+class UserControllerManager:
+    """Manages per-user NFLRedzoneController instances for multi-device support"""
+    
+    def __init__(self):
+        self.controllers: Dict[str, NFLRedzoneController] = {}
+        self.lock = threading.Lock()
+    
+    def get_controller(self, user_id: str) -> NFLRedzoneController:
+        """Get or create a controller for a specific user"""
+        with self.lock:
+            if user_id not in self.controllers:
+                logger.info(f"Creating new controller for user: {user_id}")
+                self.controllers[user_id] = NFLRedzoneController()
+            return self.controllers[user_id]
+    
+    def remove_controller(self, user_id: str):
+        """Remove a user's controller (e.g., on logout)"""
+        with self.lock:
+            if user_id in self.controllers:
+                controller = self.controllers[user_id]
+                controller.stop_monitoring()
+                del self.controllers[user_id]
+                logger.info(f"Removed controller for user: {user_id}")
+    
+    def list_users(self) -> List[str]:
+        """List all active user IDs"""
+        with self.lock:
+            return list(self.controllers.keys())
+
+# Global user controller manager
+user_controller_manager = UserControllerManager()
+
+# Backward compatibility: Global controller for anonymous/unauthenticated requests
 controller = NFLRedzoneController()
+
+def get_controller_for_request() -> NFLRedzoneController:
+    """Get the appropriate controller for the current request (user-specific or global)"""
+    user_id = get_user_from_token()
+    
+    if user_id:
+        # Multi-user mode: use user-specific controller
+        return user_controller_manager.get_controller(user_id)
+    else:
+        # Single-user mode: use global controller (backward compatible)
+        return controller
 
 # Flask Routes
 
@@ -850,230 +902,57 @@ def index():
 
 @app.route('/api/status')
 def get_status():
-    """Get current status of the controller"""
+    """Get current games with excitement scores - fetches fresh data on each request"""
+    ctrl = get_controller_for_request()
+    
+    # Fetch live games and calculate excitement scores on-demand
+    games = ctrl.get_live_games()
+    
     games_list = [
         {
             **asdict(game),
             'game_name': game_key,
             'last_redzone_time': game.last_redzone_time or 'N/A'
         }
-        for game_key, game in controller.games.items()
+        for game_key, game in games.items()
     ]
     
     return jsonify({
-        'is_running': controller.is_running,
-        'current_channel': controller.current_channel,
-        'games': games_list,
-        'logs': controller.status_logs[-20:],  # Last 20 logs
-        'saved_channels': list(controller.channel_mapping.keys()),  # Include saved channels
-        'is_authenticated': controller.remote_controller.is_authenticated,
-        'remote_provider': controller.remote_provider
+        'games': games_list  # Games include excitement_score, redzone info, scores, league, etc.
     })
 
-@app.route('/api/get_config')
-def get_config():
-    """Get saved configuration"""
-    return jsonify({
-        'channels': list(controller.channel_mapping.keys()),
-        'has_games': len(controller.games) > 0
-    })
+# Note: Channel configuration endpoints removed - channels/priorities stored client-side in Firebase
 
-@app.route('/api/configure', methods=['POST'])
-def configure():
-    """Configure channels"""
-    data = request.json
-    channels = data.get('channels', [])
-    
-    if controller.setup_channels(channels):
-        if controller.discover_games():
-            return jsonify({'success': True, 'message': 'Configuration successful'})
-        else:
-            return jsonify({'success': False, 'message': 'No live games found'})
-    else:
-        return jsonify({'success': False, 'message': 'Invalid channel configuration'})
-
-@app.route('/api/recommended_channel', methods=['GET'])
-def get_recommended_channel():
-    """Get the recommended channel based on game analysis"""
-    try:
-        recommended = controller.determine_target_channel()
-        return jsonify({
-            'success': True,
-            'recommended_channel': recommended,
-            'current_channel': controller.current_channel
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/api/stop', methods=['POST'])
-def stop_monitoring():
-    """Stop monitoring"""
-    controller.stop_monitoring()
-    return jsonify({'success': True})
+# Note: /api/stop and /api/start endpoints removed - server is stateless and fetches data on-demand
 
 @app.route('/api/refresh_games', methods=['POST'])
 def refresh_games():
-    """Refresh game list"""
-    success = controller.discover_games()
-    return jsonify({'success': success})
+    """Refresh game list - now just returns success since games are fetched on-demand"""
+    # Games are now fetched fresh on each /api/status request, so this endpoint is no longer needed
+    # Keeping it for backward compatibility
+    return jsonify({'success': True, 'message': 'Games are fetched fresh on each /api/status request'})
 
 @app.route('/api/all_games', methods=['GET'])
 def get_all_games():
     """Get all games for today"""
-    games = controller.get_all_games_today()
+    ctrl = get_controller_for_request()
+    games = ctrl.get_all_games_today()
     return jsonify({'games': games})
 
-@app.route('/api/map_game', methods=['POST'])
-def map_game():
-    """Map a specific game to a channel"""
-    data = request.json
-    event_id = data.get('event_id')
-    channel = data.get('channel')
-    priority = data.get('priority')
-    
-    if not event_id or not channel or not priority:
-        return jsonify({'success': False, 'message': 'Missing required parameters'})
-    
-    success = controller.map_game_to_channel(event_id, int(channel), int(priority))
-    return jsonify({'success': success})
+# Note: Game-to-channel mapping endpoint removed - handled client-side in Firebase
 
-@app.route('/api/clear_games', methods=['POST'])
-def clear_games():
-    """Clear all mapped games"""
-    controller.games.clear()
-    controller.add_log("Cleared all game mappings")
-    return jsonify({'success': True})
+# Note: /api/clear_games endpoint removed - games are fetched fresh on each request, no state to clear
 
-@app.route('/api/open_remote', methods=['POST'])
-def open_remote():
-    """Open remote in browser (for authentication)"""
-    try:
-        data = request.json or {}
-        provider = data.get('provider', 'ROGERS')
-        
-        # Update controller with new provider if different
-        if controller.remote_provider != provider:
-            controller.remote_controller.close()
-            controller.remote_controller = RogersRemoteController(provider)
-            controller.remote_provider = provider
-        
-        # Open remote (headless=False for initial auth, can switch to headless after)
-        controller.remote_controller.headless = False
-        success = controller.remote_controller.open_remote()
-        
-        if success:
-            return jsonify({
-                'success': True,
-                'message': f'Opened {provider} remote. Please authenticate in the browser window.',
-                'remote_url': controller.remote_controller.remote_url
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'message': 'Failed to open remote. Make sure Chrome and ChromeDriver are installed.'
-            })
-    except Exception as e:
-        logger.error(f"Error opening remote: {e}")
-        return jsonify({'success': False, 'error': str(e)})
+# Note: TV remote/provider endpoints removed - handled client-side in the app
 
-@app.route('/api/check_auth', methods=['GET'])
-def check_auth():
-    """Check authentication status"""
-    try:
-        is_authenticated = controller.remote_controller.check_authentication()
-        return jsonify({
-            'success': True,
-            'is_authenticated': is_authenticated,
-            'provider': controller.remote_provider
-        })
-    except Exception as e:
-        logger.error(f"Error checking auth: {e}")
-        return jsonify({'success': False, 'is_authenticated': False, 'error': str(e)})
+# Note: /api/set_league endpoint removed - server now returns games from both NFL and College Football
 
-@app.route('/api/test_channel', methods=['POST'])
-def test_channel():
-    """Test channel change"""
-    try:
-        data = request.json
-        channel = data.get('channel')
-        
-        if not channel:
-            return jsonify({'success': False, 'message': 'Channel number required'})
-        
-        if not controller.remote_controller.is_authenticated:
-            return jsonify({'success': False, 'message': 'Not authenticated. Please authenticate first.'})
-        
-        success = controller.remote_controller.change_channel(int(channel))
-        if success:
-            controller.current_channel = int(channel)
-            return jsonify({'success': True, 'message': f'Changed to channel {channel}'})
-        else:
-            return jsonify({'success': False, 'message': f'Failed to change to channel {channel}'})
-    except Exception as e:
-        logger.error(f"Error testing channel: {e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/api/set_provider', methods=['POST'])
-def set_provider():
-    """Set remote provider (Rogers/Xfinity/Shaw)"""
-    try:
-        data = request.json
-        provider = data.get('provider', 'ROGERS').upper()
-        
-        if provider not in REMOTE_PROVIDERS:
-            return jsonify({'success': False, 'message': f'Invalid provider. Must be one of: {", ".join(REMOTE_PROVIDERS.keys())}'})
-        
-        # Close existing controller
-        controller.remote_controller.close()
-        
-        # Create new controller with new provider
-        controller.remote_controller = RogersRemoteController(provider)
-        controller.remote_provider = provider
-        
-        return jsonify({
-            'success': True,
-            'message': f'Provider set to {provider}',
-            'provider': provider,
-            'remote_url': controller.remote_controller.remote_url
-        })
-    except Exception as e:
-        logger.error(f"Error setting provider: {e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/api/start', methods=['POST'])
-def start_monitoring():
-    """Start monitoring - automatically changes channels"""
-    if not controller.games:
-        return jsonify({'success': False, 'message': 'No games configured'})
-    
-    if not controller.remote_controller.is_authenticated:
-        return jsonify({
-            'success': False, 
-            'message': 'Not authenticated. Please authenticate with remote first.',
-            'is_running': False
-        })
-    
-    success = controller.start_monitoring()
-    if success:
-        logger.info(f"Monitoring started. is_running: {controller.is_running}")
-        # Switch to headless mode for background operation
-        controller.remote_controller.headless = True
-        return jsonify({
-            'success': True, 
-            'message': 'Monitoring started successfully',
-            'is_running': controller.is_running
-        })
-    else:
-        return jsonify({
-            'success': False, 
-            'message': 'Monitoring already running or failed to start',
-            'is_running': controller.is_running
-        })
+# Note: /api/start endpoint removed - server is stateless and fetches data on-demand via /api/status
 
 if __name__ == '__main__':
     print("🏈 NFL Redzone TV Controller")
     print("=" * 50)
-    print("Starting web interface...")
+    print("Starting web interface in DEBUG mode...")
     print("Open your browser to: http://localhost:8080")
     print("=" * 50)
-    app.run(debug=False, host='0.0.0.0', port=8080)
+    app.run(debug=True, host='0.0.0.0', port=8080)
