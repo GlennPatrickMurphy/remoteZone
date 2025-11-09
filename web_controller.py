@@ -639,9 +639,15 @@ class NFLRedzoneController:
         
         excitement = 0.0
         
-        # Close game bonus (within 10 points)
-        if score_diff <= 10:
-            excitement += (10 - score_diff) * 2  # 0-20 points
+        # Close game bonus (tiered - heavily favors very close games)
+        if score_diff <= 3:
+            excitement += 100  # 0-3 points: 100 points (one possession game!)
+        elif score_diff <= 7:
+            excitement += 50   # 4-7 points: 50 points (one score game)
+        elif score_diff <= 10:
+            excitement += 20   # 8-10 points: 20 points (close game)
+        elif score_diff <= 14:
+            excitement += 5    # 11-14 points: 5 points (somewhat close)
         
         # High scoring bonus
         if total_score > 40:
