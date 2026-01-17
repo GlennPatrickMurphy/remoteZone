@@ -31,10 +31,13 @@ const AuthScreen = () => {
     }
 
     const channelNum = parseInt(testChannel, 10);
-    const success = changeChannel(channelNum);
-    if (success) {
-      Alert.alert('Success', `Changing to channel ${channelNum}...`);
-    }
+    changeChannel(channelNum).then((success) => {
+      if (success) {
+        Alert.alert('Success', `Changing to channel ${channelNum}...`);
+      } else {
+        Alert.alert('Error', `Could not change to channel ${channelNum}. Please check if you are authenticated and the remote is loaded.`);
+      }
+    });
   };
 
   return (

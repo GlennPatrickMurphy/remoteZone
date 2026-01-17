@@ -5,6 +5,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { TouchableOpacity, Text } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import RogersRemoteWebView from '../components/RogersRemoteWebView';
+import { useDebug } from './DebugContext';
+import { logInfo, logError, logWarn, logDebug } from '../utils/remoteLogger';
 
 // Remote provider URLs
 export const REMOTE_PROVIDERS = {
@@ -39,7 +41,13 @@ export const RogersRemoteProvider = ({ children }) => {
   const [showWebView, setShowWebView] = useState(false);
   const [webViewLoaded, setWebViewLoaded] = useState(false);
   const [remoteProvider, setRemoteProvider] = useState(REMOTE_PROVIDERS.ROGERS);
+  const [webViewDebugInfo, setWebViewDebugInfo] = useState({
+    lastButtonClick: null,
+    lastError: null,
+    buttonClicks: [],
+  });
   const webViewRef = useRef(null);
+  const { debugMode } = useDebug();
 
   // Load saved provider on mount
   useEffect(() => {
@@ -58,6 +66,28 @@ export const RogersRemoteProvider = ({ children }) => {
     };
     loadProvider();
   }, []);
+
+  // Monitor WebView ref availability when authenticated
+  useEffect(() => {
+    if (authenticated) {
+      // Check ref availability periodically
+      const checkRef = setInterval(() => {
+        if (webViewRef.current) {
+          console.log('✅ WebView ref is available');
+          clearInterval(checkRef);
+        } else {
+          console.warn('⚠️ WebView ref not available yet, waiting...');
+        }
+      }, 500);
+
+      // Clear interval after 5 seconds
+      setTimeout(() => {
+        clearInterval(checkRef);
+      }, 5000);
+
+      return () => clearInterval(checkRef);
+    }
+  }, [authenticated]);
 
   // Save provider when it changes
   const updateRemoteProvider = async (provider) => {
@@ -80,7 +110,20 @@ export const RogersRemoteProvider = ({ children }) => {
     setAuthenticated(isAuth);
     if (isAuth) {
       console.log(`✅ Authenticated with ${remoteProvider.name} remote`);
+      logInfo('Authenticated with remote', { provider: remoteProvider.name });
       setWebViewLoaded(true);
+      // Ensure WebView ref is available after authentication
+      setTimeout(() => {
+        if (webViewRef.current) {
+          console.log('✅ WebView ref is available after authentication');
+          logInfo('WebView ref is available after authentication', { provider: remoteProvider.name });
+        } else {
+          console.warn('⚠️ WebView ref not available after authentication - will retry on next channel change');
+          logWarn('WebView ref not available after authentication', { provider: remoteProvider.name });
+        }
+      }, 1000);
+    } else {
+      logWarn('Authentication failed', { provider: remoteProvider.name });
     }
   };
 
@@ -101,19 +144,93 @@ export const RogersRemoteProvider = ({ children }) => {
   };
 
   const changeChannel = (channelNumber) => {
+    console.log(`🔄 changeChannel called: ${channelNumber}, authenticated: ${authenticated}, webViewLoaded: ${webViewLoaded}, webViewRef: ${!!webViewRef.current}`);
+    logInfo('changeChannel called', {
+      channelNumber,
+      authenticated,
+      webViewLoaded,
+      hasWebViewRef: !!webViewRef.current,
+    });
+    
     if (!authenticated) {
+      console.error('❌ Not authenticated - cannot change channel');
+      logError('Not authenticated - cannot change channel', { channelNumber });
       Alert.alert('Error', `Please authenticate with ${remoteProvider.name} remote first`);
-      return false;
+      return Promise.resolve(false);
     }
 
-    // Check if WebView ref is available
-    if (!webViewRef.current) {
-      console.warn('WebView ref not available, trying to find it...');
-      // Wait a moment and try again - WebView might still be mounting
-      setTimeout(() => {
-        if (webViewRef.current) {
-          webViewRef.current.changeChannel(channelNumber);
-        } else {
+    // Helper function to check if remote is ready
+    const isRemoteReady = () => {
+      if (!webViewRef.current) {
+        console.log('⏳ Remote not ready: WebView ref not available');
+        logWarn('Remote not ready: WebView ref not available', { channelNumber });
+        return false;
+      }
+
+      // Check if the WebView is ready
+      if (webViewRef.current.isReady && !webViewRef.current.isReady()) {
+        console.log('⏳ Remote not ready: WebView isReady() returned false');
+        logWarn('Remote not ready: WebView isReady() returned false', { channelNumber });
+        return false;
+      }
+
+      // Check if WebView is loaded (authenticated)
+      if (!webViewLoaded) {
+        console.log('⏳ Remote not ready: WebView not loaded yet');
+        logWarn('Remote not ready: WebView not loaded yet', { channelNumber });
+        return false;
+      }
+
+      return true;
+    };
+
+    // Helper function to attempt channel change
+    const attemptChannelChange = () => {
+      if (!isRemoteReady()) {
+        return false;
+      }
+
+      try {
+        console.log(`📺 Calling webViewRef.current.changeChannel(${channelNumber})`);
+        logInfo('Calling webViewRef.current.changeChannel', { channelNumber });
+        webViewRef.current.changeChannel(channelNumber);
+        console.log(`✅ Channel change initiated for ${channelNumber}`);
+        logInfo('Channel change initiated', { channelNumber });
+        return true;
+      } catch (error) {
+        console.error('❌ Error changing channel:', error);
+        logError('Error changing channel', { channelNumber, error: error.message, stack: error.stack });
+        return false;
+      }
+    };
+
+    // Try immediately first
+    if (attemptChannelChange()) {
+      return Promise.resolve(true);
+    }
+
+    // If that failed, wait for remote to be ready and retry
+    console.log('⏳ Waiting for remote to be ready...');
+    logInfo('Waiting for remote to be ready', { channelNumber });
+    return new Promise((resolve) => {
+      let retryCount = 0;
+      const maxRetries = 20; // 10 seconds total (20 * 500ms)
+      
+      const retryInterval = setInterval(() => {
+        retryCount++;
+        console.log(`🔄 Waiting for remote (attempt ${retryCount}/${maxRetries})...`);
+        logDebug('Waiting for remote retry', { channelNumber, attempt: retryCount, maxRetries });
+        
+        if (attemptChannelChange()) {
+          clearInterval(retryInterval);
+          resolve(true);
+          return;
+        }
+        
+        if (retryCount >= maxRetries) {
+          clearInterval(retryInterval);
+          console.error('❌ Remote still not ready after retries');
+          logError('Remote still not ready after retries', { channelNumber, retryCount: maxRetries });
           Alert.alert(
             'Remote Not Ready',
             `The ${remoteProvider.name} remote is still loading. Please open the remote once to ensure it's fully loaded.`,
@@ -122,21 +239,10 @@ export const RogersRemoteProvider = ({ children }) => {
               { text: 'Open Remote', onPress: () => setShowWebView(true) }
             ]
           );
+          resolve(false);
         }
       }, 500);
-      return false;
-    }
-
-    try {
-      // The changeChannel method in the component already handles clearing timeouts
-      webViewRef.current.changeChannel(channelNumber);
-      console.log(`Changing channel to ${channelNumber}`);
-      return true;
-    } catch (error) {
-      console.error('Error changing channel:', error);
-      Alert.alert('Error', 'Failed to change channel. Please try again.');
-      return false;
-    }
+    });
   };
 
   return (
@@ -150,6 +256,7 @@ export const RogersRemoteProvider = ({ children }) => {
         remoteProvider,
         updateRemoteProvider,
         remoteProviders: REMOTE_PROVIDERS,
+        webViewDebugInfo,
       }}
     >
       {children}
@@ -162,6 +269,14 @@ export const RogersRemoteProvider = ({ children }) => {
             ref={webViewRef}
             onAuthenticated={handleAuthenticated}
             remoteUrl={remoteProvider.url}
+            debugMode={debugMode}
+            onButtonClick={(data) => {
+              setWebViewDebugInfo(prev => ({
+                ...prev,
+                lastButtonClick: data,
+                buttonClicks: [...prev.buttonClicks.slice(-9), data],
+              }));
+            }}
           />
         </View>
       )}
@@ -183,25 +298,23 @@ export const RogersRemoteProvider = ({ children }) => {
               <Ionicons name="close" size={24} color="#333" />
             </TouchableOpacity>
           </View>
-          {/* When authenticated, WebView is mounted in background - just show it here too */}
-          {/* When not authenticated, this is where we mount it */}
-          {authenticated ? (
-            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
-              <Ionicons name="tv" size={64} color="#667eea" />
-              <Text style={{ fontSize: 18, fontWeight: 'bold', marginTop: 16, color: '#333' }}>
-                Remote Active
-              </Text>
-              <Text style={{ fontSize: 14, color: '#666', marginTop: 8, textAlign: 'center' }}>
-                The remote is running in the background. You can control channels from any screen.
-              </Text>
-            </View>
-          ) : (
+          {/* When authenticated, WebView is already mounted in hidden container - don't mount another one */}
+          {/* When not authenticated, this is where we mount it for authentication */}
+          
             <RogersRemoteWebView
               ref={webViewRef}
               onAuthenticated={handleAuthenticated}
               remoteUrl={remoteProvider.url}
+              debugMode={debugMode}
+              onButtonClick={(data) => {
+                setWebViewDebugInfo(prev => ({
+                  ...prev,
+                  lastButtonClick: data,
+                  buttonClicks: [...prev.buttonClicks.slice(-9), data],
+                }));
+              }}
             />
-          )}
+         
         </SafeAreaView>
       </Modal>
     </RogersRemoteContext.Provider>
@@ -211,12 +324,18 @@ export const RogersRemoteProvider = ({ children }) => {
 const styles = StyleSheet.create({
   webViewHidden: {
     position: 'absolute',
-    opacity: 0,
-    height: 1,
+    // Keep WebView slightly visible to prevent iOS from suspending JavaScript execution
+    // iOS may suspend JavaScript execution in completely hidden WebViews
+    opacity: 0.01, // Very transparent but still "visible" to iOS
+    height: 1, // Minimal size - just enough to be considered "visible"
     width: 1,
+    top: 0, // Keep on screen (just barely visible) instead of off-screen
+    left: 0,
     overflow: 'hidden',
     pointerEvents: 'none',
     zIndex: -1,
+    // Ensure WebView doesn't get clipped or suspended
+    backgroundColor: 'transparent',
   },
   modalContainer: {
     flex: 1,

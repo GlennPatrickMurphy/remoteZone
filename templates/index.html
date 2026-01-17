@@ -151,6 +151,44 @@
             cursor: not-allowed;
         }
 
+        .league-selector {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin: 15px 0;
+        }
+
+        .league-btn {
+            padding: 10px 24px;
+            border: 2px solid white;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.15);
+            color: white;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .league-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .league-btn.active {
+            background: white;
+            color: #667eea;
+            border-color: white;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        }
+
+        .league-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
         .games-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -386,7 +424,18 @@
     <div class="container">
         <div class="header">
             <div class="emoji">🏈</div>
-            <h1>NFL Redzone TV Controller</h1>
+            <h1 id="pageTitle">NFL Redzone TV Controller</h1>
+            
+            <!-- League Selector -->
+            <div class="league-selector">
+                <button class="league-btn active" id="leagueNFL" onclick="setLeague('nfl')">
+                    NFL
+                </button>
+                <button class="league-btn" id="leagueCFB" onclick="setLeague('college-football')">
+                    College Football
+                </button>
+            </div>
+            
             <p>Automatic channel switching based on redzone activity</p>
         </div>
 
@@ -445,12 +494,25 @@
             </div>
             
             <div class="alert alert-info">
-                Select your provider above, then click to open the remote in a new window. Sign in, then click "Check Authentication".
+                <strong>🔒 Secure Authentication:</strong> Your credentials never leave your browser. Click "Authenticate" to open a secure popup window where you'll sign in. After authentication, only session cookies are transferred to the server.
             </div>
-            <button class="btn btn-primary" onclick="openRemote()">Open Remote</button>
-            <button class="btn btn-secondary" onclick="checkAuth()">Check Authentication</button>
+            
+            <div id="authContainer">
+                <button class="btn btn-primary" onclick="openAuthPopup()">🔐 Authenticate with Provider</button>
+                <button class="btn btn-secondary" onclick="checkAuth()" style="margin-left: 10px;">Check Authentication</button>
+            </div>
+            
+            <div id="authPopupContainer" style="display: none; margin-top: 20px;">
+                <div class="alert alert-info" style="margin-bottom: 10px;">
+                    <strong>Authenticating...</strong> Please sign in to your provider in the popup window. Do not close this page.
+                </div>
+                <button class="btn btn-success" onclick="transferAuth()" id="transferAuthBtn" style="display: none;">Transfer Authentication to Server</button>
+            </div>
+            
             <span id="authStatus" class="status-badge inactive">Not Authenticated</span>
             <span id="providerBadge" class="status-badge" style="margin-left: 10px; background: #667eea;">Rogers</span>
+            
+            <div id="authMessage"></div>
             
             <h3 style="margin-top: 30px; margin-bottom: 15px;">Test Channel Change</h3>
             <div class="alert alert-info">
@@ -541,6 +603,11 @@
                     providerBadge.textContent = data.remote_provider;
                     // Update select dropdown
                     document.getElementById('providerSelect').value = data.remote_provider;
+                }
+                
+                // Update league selector and page title
+                if (data.league) {
+                    updateLeagueUI(data.league, data.league_name);
                 }
 
                 // Update games
@@ -747,6 +814,63 @@
                 }
             } catch (error) {
                 alert('Error: ' + error.message);
+            }
+        }
+
+        let changingLeague = false;
+
+        async function setLeague(league) {
+            if (changingLeague) return;
+            
+            try {
+                changingLeague = true;
+                // Disable buttons during change
+                document.getElementById('leagueNFL').disabled = true;
+                document.getElementById('leagueCFB').disabled = true;
+                
+                const response = await fetch('/api/set_league', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ league: league })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Update UI
+                    updateLeagueUI(league, data.league_name);
+                    // Refresh games
+                    await refreshGames();
+                    // Reload config
+                    await loadSavedConfig();
+                    showMessage('configStatus', `League changed to ${data.league_name}`, 'success');
+                } else {
+                    showMessage('configStatus', data.message || 'Failed to change league', 'error');
+                }
+            } catch (error) {
+                console.error('Error changing league:', error);
+                showMessage('configStatus', 'Error: ' + error.message, 'error');
+            } finally {
+                changingLeague = false;
+                document.getElementById('leagueNFL').disabled = false;
+                document.getElementById('leagueCFB').disabled = false;
+            }
+        }
+
+        function updateLeagueUI(league, leagueName) {
+            // Update page title
+            document.getElementById('pageTitle').textContent = `${leagueName || (league === 'nfl' ? 'NFL' : 'College Football')} Redzone TV Controller`;
+            
+            // Update league buttons
+            const nflBtn = document.getElementById('leagueNFL');
+            const cfbBtn = document.getElementById('leagueCFB');
+            
+            if (league === 'nfl') {
+                nflBtn.classList.add('active');
+                cfbBtn.classList.remove('active');
+            } else if (league === 'college-football') {
+                cfbBtn.classList.add('active');
+                nflBtn.classList.remove('active');
             }
         }
 

@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "NFL Redzone Controller",
-    "slug": "nfl-redzone-controller",
+    "name": "Remote Zone",
+    "slug": "remote-zone",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -9,22 +9,38 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#667eea"
+      "backgroundColor": "#ffffff"
     },
     "assetBundlePatterns": [
       "**/*"
     ],
+    "plugins": [
+      [
+        "react-native-google-mobile-ads",
+        {
+          "iosAppId": "ca-app-pub-5717605354410342~8468579191",
+          "androidAppId": "ca-app-pub-5717605354410342~8468579191"
+        }
+      ]
+    ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.remotezone.nflredzone",
-      "buildNumber": "1.0.0"
+      "bundleIdentifier": "com.thinkstation.remotezone",
+      "buildNumber": "1.0.7",
+      "googleServicesFile": "./GoogleService-Info.plist",
+      "config": {
+        "googleMobileAdsAppId": "ca-app-pub-5717605354410342~8468579191"
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#667eea"
       },
-      "package": "com.remotezone.nflredzone"
+      "package": "com.remotezone.nflredzone",
+      "config": {
+        "googleMobileAdsAppId": "ca-app-pub-5717605354410342~8468579191"
+      }
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -32,8 +48,9 @@
     "scheme": "nfl-redzone",
     "extra": {
       "eas": {
-        "projectId": "nfl-redzone-controller"
+        "projectId": "dd0b1cc6-81c7-417a-b1df-afb77923d259"
       }
-    }
+    },
+    "owner": "glennpatrickmurphy"
   }
 }

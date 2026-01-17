@@ -219,10 +219,7 @@ class NFLRedzoneController:
         # Create ESPN clients for both leagues
         self.nfl_client = ESPNClient('nfl')
         self.college_client = ESPNClient('college-football')
-        # Note: Channel mappings and priorities are stored client-side in Firebase, not on server
     
-    # Note: Configuration (channels, priorities, game-to-channel mappings) 
-    # is now stored client-side in Firebase, not on the server
     
     def get_live_games(self) -> Dict[str, Game]:
         """Fetch all current live games from both NFL and College Football and calculate excitement scores"""
@@ -641,17 +638,17 @@ class NFLRedzoneController:
         
         # Close game bonus (tiered - heavily favors very close games)
         if score_diff <= 3:
-            excitement += 100  # 0-3 points: 100 points (one possession game!)
+            excitement += 1000  # 0-3 points: 100 points (one possession game!)
         elif score_diff <= 7:
-            excitement += 50   # 4-7 points: 50 points (one score game)
+            excitement += 500   # 4-7 points: 50 points (one score game)
         elif score_diff <= 10:
-            excitement += 20   # 8-10 points: 20 points (close game)
+            excitement += 200   # 8-10 points: 20 points (close game)
         elif score_diff <= 14:
-            excitement += 5    # 11-14 points: 5 points (somewhat close)
+            excitement += 50    # 11-14 points: 5 points (somewhat close)
         
         # High scoring bonus
         if total_score > 40:
-            excitement += (total_score - 40) * 0.5  # Bonus for high scoring
+            excitement += (total_score) *10  # Bonus for high scoring
         
         # Last 15 minutes of 4th quarter bonus
         if game.quarter == 4 and time_remaining_minutes <= 15:

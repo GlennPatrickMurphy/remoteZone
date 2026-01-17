@@ -1,6 +1,6 @@
-# 🏈 NFL Redzone Controller - iPhone App
+# 🏈 Remote Zone - iPhone App
 
-This is the iPhone app version of the NFL Redzone Controller. It connects to the Flask backend running on your Mac to monitor NFL games and automatically switch TV channels.
+This is the iPhone app version of Remote Zone. It connects to the Flask backend running on your Mac to monitor NFL games and automatically switch TV channels.
 
 ## 📱 Features
 

@@ -1,0 +1,22 @@
+{
+  "channels": [
+    18,
+    28
+  ],
+  "games": [
+    {
+      "event_id": "401752893",
+      "home_team": "Penn State Nittany Lions",
+      "away_team": "Indiana Hoosiers",
+      "channel": 28,
+      "priority": 2
+    },
+    {
+      "event_id": "401756945",
+      "home_team": "Texas Tech Red Raiders",
+      "away_team": "BYU Cougars",
+      "channel": 18,
+      "priority": 1
+    }
+  ]
+}

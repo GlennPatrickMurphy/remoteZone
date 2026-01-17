@@ -1,15 +1,39 @@
 // API Configuration
-// Your Mac's IP address on the local network
-const MAC_IP = '10.0.0.175';
+// Automatically detect server URL based on platform and environment
 
-// Always use network IP for iPhone app
-export const API_BASE_URL = `http://${MAC_IP}:8080`; // Network IP for physical iPhone
+const CLOUD_RUN_URL = 'https://nfl-redzone-server-bnymowbt4q-uc.a.run.app';
+// For local development, you can set your machine's IP address here
+// Find it with: ifconfig | grep "inet " | grep -v 127.0.0.1
+// Example: const LOCAL_DEV_URL = 'http://192.168.1.100:8080';
+const LOCAL_DEV_URL = null; // Set to null to always use Cloud Run, or set your dev machine IP
 
-// Instructions:
-// 1. Find your Mac's IP address: System Settings > Network > Wi-Fi > Details
-// 2. Replace XXX above with your Mac's IP address
-// 3. Make sure your Mac's firewall allows connections on port 8080
-// 4. Make sure both iPhone and Mac are on the same Wi-Fi network
+let API_BASE_URL;
+
+if (typeof window !== 'undefined' && window.location) {
+  // Web platform
+  const hostname = window.location.hostname;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    // Web on localhost: use local server if configured, otherwise Cloud Run
+    API_BASE_URL = LOCAL_DEV_URL || CLOUD_RUN_URL;
+  } else {
+    // Production web: use Cloud Run URL
+    API_BASE_URL = CLOUD_RUN_URL;
+  }
+  console.log('🌐 Web platform detected - API URL:', API_BASE_URL);
+} else {
+  // Mobile platform (iOS/Android)
+  // For mobile, localhost doesn't work - use Cloud Run or dev machine IP
+  if (__DEV__ && LOCAL_DEV_URL) {
+    // Development with local server: use configured dev machine IP
+    API_BASE_URL = LOCAL_DEV_URL;
+    console.log('📱 Mobile platform - Using local dev server:', API_BASE_URL);
+  } else {
+    // Default: use Cloud Run (works everywhere)
+    API_BASE_URL = CLOUD_RUN_URL;
+    console.log('📱 Mobile platform - Using Cloud Run:', API_BASE_URL);
+  }
+  console.log('📱 Environment:', __DEV__ ? 'Development' : 'Production');
+}
 
 export const API_ENDPOINTS = {
   STATUS: '/api/status',
@@ -24,5 +48,9 @@ export const API_ENDPOINTS = {
   MAP_GAME: '/api/map_game',
   CLEAR_GAMES: '/api/clear_games',
   GET_CONFIG: '/api/get_config',
+  SET_LEAGUE: '/api/set_league',
 };
+
+// Export for debugging
+export { API_BASE_URL };
 

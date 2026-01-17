@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow authenticated users to read/write their own user data
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Allow authenticated users to read/write their own channel config
+    match /users/{userId}/channels/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Allow authenticated users to read/write their own game mappings
+    match /users/{userId}/gameMappings/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Allow anyone to write app logs (for remote logging from TestFlight builds)
+    // This is safe because logs are append-only and don't contain sensitive data
+    match /app_logs/{logId} {
+      allow create: if true; // Allow anyone to create logs
+      allow read: if request.auth != null; // Only authenticated users can read logs
+      allow update, delete: if false; // Prevent updates/deletes for security
+    }
+    
+    // Allow authenticated users to create TV box requests
+    match /tvBoxRequests/{requestId} {
+      allow create: if request.auth != null;
+      allow read: if request.auth != null;
+      allow update, delete: if false;
+    }
+    
+    // Deny all other access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+

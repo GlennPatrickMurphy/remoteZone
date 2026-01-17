@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs
+*.log
+nfl_redzone_controller.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Mobile app (not needed for server)
+mobile-app/
+node_modules/
+
+# Build artifacts
+*.zip
+*.tar.gz
+*.egg-info/
+dist/
+build/
+
+# Chrome/Chromedriver (not needed in Cloud Run)
+.chrome/
+chromedriver
+chromedriver_*
+
+# Documentation
+*.md
+!README.md
+
+# Config files (keep only what's needed)
+*.json
+!firestore.rules
+
+# Test files
+test/
+tests/
+*_test.py
+*_tests.py
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+

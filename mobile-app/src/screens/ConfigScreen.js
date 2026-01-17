@@ -8,17 +8,19 @@ import {
   TouchableOpacity,
   Alert,
   ActivityIndicator,
+  RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import ApiService from '../services/api';
+import { getChannelConfig, saveChannels, mapGameToChannel, clearGameMappings, setPriority1 } from '../services/channelConfig';
 
 const ConfigScreen = () => {
-  const [channels, setChannels] = useState(['', '', '']);
   const [loading, setLoading] = useState(false);
-  const [games, setGames] = useState([]);
+  const [refreshing, setRefreshing] = useState(false);
   const [allGames, setAllGames] = useState([]);
   const [selectedChannel, setSelectedChannel] = useState({});
+  const [gameMappings, setGameMappings] = useState({});
 
   useEffect(() => {
     loadConfig();
@@ -27,66 +29,126 @@ const ConfigScreen = () => {
 
   const loadConfig = async () => {
     try {
-      const config = await ApiService.getConfig();
-      if (config.channels) {
-        const newChannels = [...channels];
-        config.channels.forEach((ch, i) => {
-          if (i < 3) newChannels[i] = ch.toString();
+      const config = await getChannelConfig();
+      
+      // Load game mappings
+      if (config.gameMappings) {
+        setGameMappings(config.gameMappings);
+        // Pre-populate selected channels from mappings
+        const selected = {};
+        Object.keys(config.gameMappings).forEach(eventId => {
+          selected[eventId] = config.gameMappings[eventId].channel.toString();
         });
-        setChannels(newChannels);
+        setSelectedChannel(selected);
       }
     } catch (error) {
       console.error('Error loading config:', error);
     }
   };
 
-  const loadAllGames = async () => {
+  const loadAllGames = async (isRefresh = false) => {
     try {
+      if (isRefresh) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+      
       const response = await ApiService.getAllGames();
-      setAllGames(response.games || []);
+      const games = response.games || [];
+      
+      // Also fetch live games from /api/status to get updated live status
+      try {
+        const statusResponse = await ApiService.getStatus();
+        const liveGames = statusResponse.games || [];
+        
+        // Create a map of live game event_ids for quick lookup
+        const liveGameIds = new Set(liveGames.map(g => g.event_id));
+        
+        // Update is_live status for games that are currently live
+        const updatedGames = games.map(game => ({
+          ...game,
+          is_live: liveGameIds.has(game.event_id)
+        }));
+        
+        setAllGames(updatedGames);
+        console.log(`✅ Loaded ${updatedGames.length} games (${liveGames.length} live)`);
+      } catch (statusError) {
+        // If status endpoint fails, just use all_games response
+        console.warn('Could not fetch live status, using all_games data:', statusError);
+        setAllGames(games);
+      }
     } catch (error) {
       console.error('Error loading games:', error);
-    }
-  };
-
-  const handleSaveChannels = async () => {
-    const validChannels = channels
-      .filter((ch) => ch.trim() !== '')
-      .map((ch) => parseInt(ch));
-
-    if (validChannels.length < 2) {
-      Alert.alert('Error', 'Please enter at least 2 channels');
-      return;
-    }
-
-    setLoading(true);
-    try {
-      await ApiService.configureChannels(validChannels);
-      Alert.alert('Success', 'Channels saved successfully!');
-    } catch (error) {
-      Alert.alert('Error', error.message || 'Failed to save channels');
+      if (!isRefresh) {
+        Alert.alert('Error', 'Failed to load games. Please try again.');
+      }
     } finally {
-      setLoading(false);
+      if (isRefresh) {
+        setRefreshing(false);
+      } else {
+        setLoading(false);
+      }
     }
   };
 
   const handleMapGame = async (eventId) => {
     const channel = selectedChannel[eventId];
-    if (!channel) {
-      Alert.alert('Error', 'Please select a channel first');
+    if (!channel || !channel.trim()) {
+      Alert.alert('Error', 'Please enter a channel number');
       return;
     }
 
-    const validChannels = channels
-      .filter((ch) => ch.trim() !== '')
-      .map((ch) => parseInt(ch));
-    const priority = validChannels.indexOf(parseInt(channel)) + 1;
+    const channelNum = parseInt(channel);
+    if (isNaN(channelNum) || channelNum <= 0) {
+      Alert.alert('Error', 'Please enter a valid channel number');
+      return;
+    }
 
     setLoading(true);
     try {
-      await ApiService.mapGame(eventId, channel, priority);
+      // Get current config to calculate priority correctly
+      const currentConfig = await getChannelConfig();
+      const currentMappings = currentConfig.gameMappings || {};
+      
+      // Calculate priority based on existing mappings
+      // Priority is determined by the order channels are first used
+      // First unique channel = priority 1, second = priority 2, etc.
+      const usedChannels = new Set();
+      const channelToPriority = new Map();
+      
+      // Build map of channel -> priority from existing mappings
+      Object.values(currentMappings).forEach(mapping => {
+        if (!usedChannels.has(mapping.channel)) {
+          usedChannels.add(mapping.channel);
+          channelToPriority.set(mapping.channel, mapping.priority);
+        }
+      });
+      
+      let priority;
+      if (channelToPriority.has(channelNum)) {
+        // Channel already used - use its existing priority
+        priority = channelToPriority.get(channelNum);
+      } else {
+        // New channel - assign next priority
+        priority = usedChannels.size + 1;
+      }
+
+      await mapGameToChannel(eventId, channelNum, priority);
+      
+      // Update channels list automatically (extract unique channels from all mappings)
+      const updatedConfig = await getChannelConfig();
+      const allChannels = new Set();
+      if (updatedConfig.gameMappings) {
+        Object.values(updatedConfig.gameMappings).forEach(m => allChannels.add(m.channel));
+      }
+      allChannels.add(channelNum);
+      
+      // Save channels list for reference
+      await saveChannels(Array.from(allChannels).sort((a, b) => a - b));
+      
       Alert.alert('Success', 'Game mapped successfully!');
-      loadConfig();
+      await loadConfig();
     } catch (error) {
       Alert.alert('Error', error.message || 'Failed to map game');
     } finally {
@@ -102,9 +164,9 @@ const ConfigScreen = () => {
         style: 'destructive',
         onPress: async () => {
           try {
-            await ApiService.clearGames();
+            await clearGameMappings();
             Alert.alert('Success', 'All game mappings cleared');
-            loadConfig();
+            await loadConfig();
           } catch (error) {
             Alert.alert('Error', error.message || 'Failed to clear games');
           }
@@ -113,63 +175,37 @@ const ConfigScreen = () => {
     ]);
   };
 
-  const validChannels = channels
-    .filter((ch) => ch.trim() !== '')
-    .map((ch) => parseInt(ch));
+  const handleSetPriority1 = async (eventId) => {
+    if (!gameMappings[eventId]) {
+      Alert.alert('Error', 'Game must be mapped to a channel first');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await setPriority1(eventId);
+      Alert.alert('Success', 'Game set as Priority 1');
+      await loadConfig();
+    } catch (error) {
+      Alert.alert('Error', error.message || 'Failed to set priority');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <ScrollView style={styles.scrollView}>
-        {/* Channels Configuration */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Configure Channels</Text>
-          <Text style={styles.subtitle}>
-            Enter channel numbers for your games
-          </Text>
-
-          {[0, 1, 2].map((index) => (
-            <View key={index} style={styles.inputContainer}>
-              <Text style={styles.label}>
-                Channel {index + 1}
-                {index === 0 && ' (Highest Priority)'}
-                {index === 2 && ' (Optional)'}
-              </Text>
-              <TextInput
-                style={styles.input}
-                value={channels[index]}
-                onChangeText={(text) => {
-                  const newChannels = [...channels];
-                  newChannels[index] = text;
-                  setChannels(newChannels);
-                }}
-                placeholder="e.g., 502"
-                keyboardType="number-pad"
-              />
-            </View>
-          ))}
-
-          <TouchableOpacity
-            style={[styles.button, styles.buttonPrimary]}
-            onPress={handleSaveChannels}
-            disabled={loading || validChannels.length < 2}
-          >
-            {loading ? (
-              <ActivityIndicator color="white" />
-            ) : (
-              <>
-                <Ionicons name="save" size={20} color="white" />
-                <Text style={styles.buttonText}>Save Channels</Text>
-              </>
-            )}
-          </TouchableOpacity>
-
-          {validChannels.length < 2 && (
-            <Text style={styles.warningText}>
-              At least 2 channels are required
-            </Text>
-          )}
-        </View>
-
+      <ScrollView 
+        style={styles.scrollView}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => loadAllGames(true)}
+            tintColor="#667eea"
+            colors={['#667eea']}
+          />
+        }
+      >
         {/* Game Mapping */}
         <View style={styles.card}>
           <View style={styles.cardHeader}>
@@ -178,6 +214,10 @@ const ConfigScreen = () => {
               <Ionicons name="refresh" size={24} color="#667eea" />
             </TouchableOpacity>
           </View>
+          
+          <Text style={styles.subtitle}>
+            Games for today - NFL & College Football
+          </Text>
 
           <TouchableOpacity
             style={[styles.button, styles.buttonDanger]}
@@ -187,43 +227,93 @@ const ConfigScreen = () => {
             <Text style={styles.buttonText}>Clear All Mappings</Text>
           </TouchableOpacity>
 
-          {allGames.map((game) => (
-            <View key={game.event_id} style={styles.gameSelectorCard}>
+          {allGames.map((game) => {
+            const mapping = gameMappings[game.event_id];
+            const isMapped = !!mapping;
+            
+            return (
+            <View 
+              key={game.event_id} 
+              style={[
+                styles.gameSelectorCard,
+                isMapped && styles.gameSelectorCardMapped
+              ]}
+            >
               <View style={styles.gameInfo}>
-                <Text style={styles.gameTitle}>
-                  {game.away_team} @ {game.home_team}
-                </Text>
+                <View style={styles.gameTitleRow}>
+                  <Text style={styles.gameTitle}>
+                    {game.away_team} @ {game.home_team}
+                  </Text>
+                  {isMapped && (
+                    <View style={styles.mappedBadge}>
+                      <Ionicons name="checkmark-circle" size={16} color="#10b981" />
+                      <Text style={styles.mappedBadgeText}>
+                        Ch {mapping.channel} (P{mapping.priority})
+                      </Text>
+                    </View>
+                  )}
+                </View>
                 <Text style={styles.gameStatus}>
-                  {game.is_live ? '🔴 LIVE' : game.status}
+                  {game.is_live ? '🔴 LIVE' : game.status || 'Scheduled'}
+                  {game.league && ` • ${game.league === 'nfl' ? 'NFL' : 'College Football'}`}
                 </Text>
               </View>
 
-              {validChannels.length >= 2 && (
-                <View style={styles.gameControls}>
-                  <View style={styles.pickerContainer}>
-                    <TextInput
-                      style={styles.pickerInput}
-                      value={selectedChannel[game.event_id] || ''}
-                      onChangeText={(text) => {
-                        setSelectedChannel({
-                          ...selectedChannel,
-                          [game.event_id]: text,
-                        });
-                      }}
-                      placeholder="Channel"
-                      keyboardType="number-pad"
-                    />
-                  </View>
-                  <TouchableOpacity
-                    style={styles.mapButton}
-                    onPress={() => handleMapGame(game.event_id)}
-                  >
-                    <Text style={styles.mapButtonText}>Map</Text>
-                  </TouchableOpacity>
-                </View>
+              {isMapped && (
+                <TouchableOpacity
+                  style={[
+                    styles.priorityButton,
+                    mapping.priority === 1 && styles.priorityButtonActive
+                  ]}
+                  onPress={() => handleSetPriority1(game.event_id)}
+                  disabled={loading || mapping.priority === 1}
+                >
+                  <Ionicons 
+                    name={mapping.priority === 1 ? "star" : "star-outline"} 
+                    size={16} 
+                    color={mapping.priority === 1 ? "#fbbf24" : "#666"} 
+                  />
+                  <Text style={[
+                    styles.priorityButtonText,
+                    mapping.priority === 1 && styles.priorityButtonTextActive
+                  ]}>
+                    {mapping.priority === 1 ? 'Priority 1' : 'Set as Priority 1'}
+                  </Text>
+                </TouchableOpacity>
               )}
+
+              <View style={styles.gameControls}>
+                <View style={styles.pickerContainer}>
+                  <TextInput
+                    style={styles.pickerInput}
+                    value={selectedChannel[game.event_id] || ''}
+                    onChangeText={(text) => {
+                      setSelectedChannel({
+                        ...selectedChannel,
+                        [game.event_id]: text,
+                      });
+                    }}
+                    placeholder={isMapped ? `Ch ${mapping.channel}` : "Enter channel number"}
+                    keyboardType="number-pad"
+                  />
+                </View>
+                <TouchableOpacity
+                  style={[styles.mapButton, isMapped && styles.mapButtonMapped]}
+                  onPress={() => handleMapGame(game.event_id)}
+                  disabled={loading}
+                >
+                  {loading ? (
+                    <ActivityIndicator color="white" size="small" />
+                  ) : (
+                    <Text style={styles.mapButtonText}>
+                      {isMapped ? 'Update' : 'Map'}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
             </View>
-          ))}
+            );
+          })}
 
           {allGames.length === 0 && (
             <View style={styles.emptyState}>
@@ -279,6 +369,34 @@ const styles = StyleSheet.create({
     color: '#666',
     marginBottom: 16,
   },
+  leagueSelector: {
+    flexDirection: 'row',
+    marginBottom: 12,
+    backgroundColor: '#f3f4f6',
+    borderRadius: 8,
+    padding: 4,
+    alignSelf: 'flex-start',
+  },
+  leagueButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 6,
+    marginHorizontal: 2,
+  },
+  leagueButtonActive: {
+    backgroundColor: '#667eea',
+  },
+  leagueButtonDisabled: {
+    opacity: 0.5,
+  },
+  leagueButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#666',
+  },
+  leagueButtonTextActive: {
+    color: '#fff',
+  },
   inputContainer: {
     marginBottom: 16,
   },
@@ -330,14 +448,39 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#e5e7eb',
   },
+  gameSelectorCardMapped: {
+    borderColor: '#10b981',
+    backgroundColor: '#f0fdf4',
+  },
   gameInfo: {
     marginBottom: 8,
+  },
+  gameTitleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
   },
   gameTitle: {
     fontSize: 16,
     fontWeight: 'bold',
     color: '#333',
-    marginBottom: 4,
+    flex: 1,
+  },
+  mappedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#d1fae5',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  mappedBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#065f46',
+    marginLeft: 4,
   },
   gameStatus: {
     fontSize: 12,
@@ -366,10 +509,38 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 8,
   },
+  mapButtonMapped: {
+    backgroundColor: '#667eea',
+  },
   mapButtonText: {
     color: 'white',
     fontSize: 14,
     fontWeight: '600',
+  },
+  priorityButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: '#f3f4f6',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    marginBottom: 12,
+  },
+  priorityButtonActive: {
+    backgroundColor: '#fef3c7',
+    borderColor: '#fbbf24',
+  },
+  priorityButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#666',
+    marginLeft: 6,
+  },
+  priorityButtonTextActive: {
+    color: '#92400e',
   },
   emptyState: {
     alignItems: 'center',
